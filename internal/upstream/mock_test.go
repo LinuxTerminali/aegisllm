@@ -110,3 +110,40 @@ func TestMockUpstream_ConcurrencyLimit(t *testing.T) {
 		t.Logf("status1: %d, status2: %d", status1, status2)
 	}
 }
+
+func TestMockUpstream_TokenBucketRateLimit(t *testing.T) {
+	// 2 tokens burst, 1 RPS
+	mock := NewMockUpstream(MockConfig{
+		RateLimitRPS:   1,
+		RateLimitBurst: 2,
+	})
+	server := httptest.NewServer(mock)
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	// First 2 requests consume the 2 burst tokens -> 200 OK
+	for i := 0; i < 2; i++ {
+		resp, err := client.Forward(context.Background(), "/v1/chat/completions", http.Header{}, []byte(`{}`))
+		if err != nil {
+			t.Fatalf("request %d failed: %v", i, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("request %d expected 200, got %d", i, resp.StatusCode)
+		}
+	}
+
+	// 3rd immediate request must be rejected with 429
+	resp3, err := client.Forward(context.Background(), "/v1/chat/completions", http.Header{}, []byte(`{}`))
+	if err != nil {
+		t.Fatalf("request 3 failed: %v", err)
+	}
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d", resp3.StatusCode)
+	}
+}

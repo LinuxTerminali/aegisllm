@@ -20,9 +20,10 @@ var (
 
 // Config defines the scheduler operating limits.
 type Config struct {
-	MaxConcurrency int           `json:"max_concurrency"`
-	MaxQueueSize   int           `json:"max_queue_size"`
-	MaxQueueWait   time.Duration `json:"max_queue_wait"`
+	MaxConcurrency int                    `json:"max_concurrency"`
+	MaxQueueSize   int                    `json:"max_queue_size"`
+	MaxQueueWait   time.Duration          `json:"max_queue_wait"`
+	Policy         queue.SchedulingPolicy `json:"policy"`
 }
 
 // Stats holds snapshot statistics of scheduler operations.
@@ -88,10 +89,13 @@ func NewScheduler(cfg Config) *Scheduler {
 	if cfg.MaxQueueWait <= 0 {
 		cfg.MaxQueueWait = 30 * time.Second
 	}
+	if cfg.Policy == "" {
+		cfg.Policy = queue.PolicyPriority
+	}
 
 	return &Scheduler{
 		cfg: cfg,
-		pq:  queue.NewPriorityQueue(cfg.MaxQueueSize),
+		pq:  queue.NewPriorityQueueWithPolicy(cfg.MaxQueueSize, cfg.Policy),
 	}
 }
 
@@ -125,18 +129,22 @@ func (s *Scheduler) Acquire(ctx context.Context, meta model.RequestMetadata) (*L
 	}
 	s.mu.Unlock()
 
+	timer := time.NewTimer(s.cfg.MaxQueueWait)
+	defer timer.Stop()
+
 	// Wait for slot assignment, context cancellation, or queue timeout
 	select {
 	case <-item.Ready:
-		waitDur := time.Since(start)
+		if err := ctx.Err(); err != nil {
+			s.releaseSlot()
+			s.totalCanceled.Add(1)
+			return nil, err
+		}
+		s.totalAdmitted.Add(1)
 		lease := &Lease{
 			scheduler:    s,
 			meta:         meta,
-			waitDuration: waitDur,
-		}
-		if err := ctx.Err(); err != nil {
-			lease.Release()
-			return nil, err
+			waitDuration: time.Since(start),
 		}
 		return lease, nil
 
@@ -153,7 +161,7 @@ func (s *Scheduler) Acquire(ctx context.Context, meta model.RequestMetadata) (*L
 		s.totalCanceled.Add(1)
 		return nil, ctx.Err()
 
-	case <-time.After(s.cfg.MaxQueueWait):
+	case <-timer.C:
 		// Queue wait timeout
 		_, err := s.pq.Remove(item.ID)
 		if err == nil {
@@ -168,7 +176,7 @@ func (s *Scheduler) Acquire(ctx context.Context, meta model.RequestMetadata) (*L
 }
 
 // releaseSlot yields an active concurrency slot.
-// If items are waiting in the queue, the highest priority item is granted the slot.
+// If items are waiting in the queue, the next item is granted the slot.
 // Otherwise, active concurrency is decremented.
 func (s *Scheduler) releaseSlot() {
 	s.mu.Lock()
@@ -181,7 +189,6 @@ func (s *Scheduler) releaseSlot() {
 	}
 
 	// Slot transferred directly to dequeued item
-	s.totalAdmitted.Add(1)
 	close(next.Ready)
 }
 

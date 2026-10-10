@@ -52,6 +52,31 @@ func TestPriorityQueue_OrderAndTieBreaker(t *testing.T) {
 	}
 }
 
+func TestPriorityQueue_FIFOPolicy(t *testing.T) {
+	pq := NewPriorityQueueWithPolicy(10, PolicyFIFO)
+
+	items := []*Item{
+		NewItem("batch-1", model.RequestMetadata{Priority: model.PriorityBatch}, context.Background()),
+		NewItem("production-1", model.RequestMetadata{Priority: model.PriorityProduction}, context.Background()),
+		NewItem("interactive-1", model.RequestMetadata{Priority: model.PriorityInteractive}, context.Background()),
+	}
+
+	for _, it := range items {
+		if err := pq.Enqueue(it); err != nil {
+			t.Fatalf("failed to enqueue: %v", err)
+		}
+	}
+
+	// Must dequeue in exact arrival order (FIFO), ignoring priority
+	expected := []string{"batch-1", "production-1", "interactive-1"}
+	for _, exp := range expected {
+		popped := pq.Dequeue()
+		if popped == nil || popped.ID != exp {
+			t.Fatalf("expected %s, got %v", exp, popped)
+		}
+	}
+}
+
 func TestPriorityQueue_CapacityLimit(t *testing.T) {
 	capacity := 3
 	pq := NewPriorityQueue(capacity)

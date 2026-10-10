@@ -1,0 +1,293 @@
+[
+  {
+    "mode": "A. Direct + Retries \u0026 Jitter",
+    "total_submitted": 100,
+    "successful": 61,
+    "success_rate_pct": 61,
+    "http_429_count": 39,
+    "http_503_count": 0,
+    "http_504_count": 0,
+    "canceled_count": 0,
+    "other_failures": 0,
+    "total_retries": 191,
+    "throughput_rps": 65.95440115757023,
+    "wall_clock_duration_ms": 924.881417,
+    "p50_latency_ms": 103.133791,
+    "p95_latency_ms": 273.662125,
+    "p50_wait_ms": 0,
+    "p95_wait_ms": 0,
+    "classes": {
+      "background": {
+        "total_requests": 15,
+        "completed": 11,
+        "failed": 4,
+        "success_rate_pct": 73.33333333333333,
+        "p50_latency_ms": 113.535667,
+        "p95_latency_ms": 311.134,
+        "p50_wait_ms": 0,
+        "p95_wait_ms": 0
+      },
+      "batch": {
+        "total_requests": 12,
+        "completed": 7,
+        "failed": 5,
+        "success_rate_pct": 58.333333333333336,
+        "p50_latency_ms": 50.655417,
+        "p95_latency_ms": 203.192791,
+        "p50_wait_ms": 0,
+        "p95_wait_ms": 0
+      },
+      "interactive": {
+        "total_requests": 24,
+        "completed": 16,
+        "failed": 8,
+        "success_rate_pct": 66.66666666666666,
+        "p50_latency_ms": 81.640042,
+        "p95_latency_ms": 210.751625,
+        "p50_wait_ms": 0,
+        "p95_wait_ms": 0
+      },
+      "production": {
+        "total_requests": 49,
+        "completed": 27,
+        "failed": 22,
+        "success_rate_pct": 55.10204081632652,
+        "p50_latency_ms": 108.268583,
+        "p95_latency_ms": 286.426291,
+        "p50_wait_ms": 0,
+        "p95_wait_ms": 0
+      }
+    },
+    "runs": {
+      "run-batch-eval": {
+        "total_requests": 12,
+        "completed": 7,
+        "failed": 5,
+        "success_rate_pct": 58.333333333333336,
+        "service_share_pct": 11.475409836065573
+      },
+      "run-bg-indexer": {
+        "total_requests": 15,
+        "completed": 11,
+        "failed": 4,
+        "success_rate_pct": 73.33333333333333,
+        "service_share_pct": 18.0327868852459
+      },
+      "run-interactive-qa": {
+        "total_requests": 24,
+        "completed": 16,
+        "failed": 8,
+        "success_rate_pct": 66.66666666666666,
+        "service_share_pct": 26.229508196721312
+      },
+      "run-prod-assistant": {
+        "total_requests": 21,
+        "completed": 10,
+        "failed": 11,
+        "success_rate_pct": 47.61904761904761,
+        "service_share_pct": 16.39344262295082
+      },
+      "run-prod-checkout": {
+        "total_requests": 28,
+        "completed": 17,
+        "failed": 11,
+        "success_rate_pct": 60.71428571428571,
+        "service_share_pct": 27.86885245901639
+      }
+    }
+  },
+  {
+    "mode": "B. Bounded FIFO Scheduler",
+    "total_submitted": 100,
+    "successful": 46,
+    "success_rate_pct": 46,
+    "http_429_count": 49,
+    "http_503_count": 4,
+    "http_504_count": 1,
+    "canceled_count": 0,
+    "other_failures": 0,
+    "total_retries": 0,
+    "throughput_rps": 56.28122135756118,
+    "wall_clock_duration_ms": 817.324125,
+    "p50_latency_ms": 324.270708,
+    "p95_latency_ms": 602.774042,
+    "p50_wait_ms": 267,
+    "p95_wait_ms": 493,
+    "classes": {
+      "background": {
+        "total_requests": 15,
+        "completed": 10,
+        "failed": 5,
+        "success_rate_pct": 66.66666666666666,
+        "p50_latency_ms": 125.196542,
+        "p95_latency_ms": 603.227667,
+        "p50_wait_ms": 102,
+        "p95_wait_ms": 493
+      },
+      "batch": {
+        "total_requests": 12,
+        "completed": 2,
+        "failed": 10,
+        "success_rate_pct": 16.666666666666664,
+        "p50_latency_ms": 233.57175,
+        "p95_latency_ms": 492.24037500000003,
+        "p50_wait_ms": 123,
+        "p95_wait_ms": 463
+      },
+      "interactive": {
+        "total_requests": 24,
+        "completed": 8,
+        "failed": 16,
+        "success_rate_pct": 33.33333333333333,
+        "p50_latency_ms": 341.232583,
+        "p95_latency_ms": 650.583958,
+        "p50_wait_ms": 284,
+        "p95_wait_ms": 577
+      },
+      "production": {
+        "total_requests": 49,
+        "completed": 26,
+        "failed": 23,
+        "success_rate_pct": 53.06122448979592,
+        "p50_latency_ms": 343.17325,
+        "p95_latency_ms": 519.3601669999999,
+        "p50_wait_ms": 267,
+        "p95_wait_ms": 478
+      }
+    },
+    "runs": {
+      "run-batch-eval": {
+        "total_requests": 12,
+        "completed": 2,
+        "failed": 10,
+        "success_rate_pct": 16.666666666666664,
+        "service_share_pct": 4.3478260869565215
+      },
+      "run-bg-indexer": {
+        "total_requests": 15,
+        "completed": 10,
+        "failed": 5,
+        "success_rate_pct": 66.66666666666666,
+        "service_share_pct": 21.73913043478261
+      },
+      "run-interactive-qa": {
+        "total_requests": 24,
+        "completed": 8,
+        "failed": 16,
+        "success_rate_pct": 33.33333333333333,
+        "service_share_pct": 17.391304347826086
+      },
+      "run-prod-assistant": {
+        "total_requests": 21,
+        "completed": 14,
+        "failed": 7,
+        "success_rate_pct": 66.66666666666666,
+        "service_share_pct": 30.434782608695656
+      },
+      "run-prod-checkout": {
+        "total_requests": 28,
+        "completed": 12,
+        "failed": 16,
+        "success_rate_pct": 42.857142857142854,
+        "service_share_pct": 26.08695652173913
+      }
+    }
+  },
+  {
+    "mode": "C. Priority-Aware Scheduler",
+    "total_submitted": 100,
+    "successful": 51,
+    "success_rate_pct": 51,
+    "http_429_count": 47,
+    "http_503_count": 1,
+    "http_504_count": 1,
+    "canceled_count": 0,
+    "other_failures": 0,
+    "total_retries": 0,
+    "throughput_rps": 62.92592274499083,
+    "wall_clock_duration_ms": 810.476792,
+    "p50_latency_ms": 142.057625,
+    "p95_latency_ms": 357.041041,
+    "p50_wait_ms": 79,
+    "p95_wait_ms": 260,
+    "classes": {
+      "background": {
+        "total_requests": 15,
+        "completed": 0,
+        "failed": 15,
+        "success_rate_pct": 0,
+        "p50_latency_ms": 0,
+        "p95_latency_ms": 0,
+        "p50_wait_ms": 0,
+        "p95_wait_ms": 0
+      },
+      "batch": {
+        "total_requests": 12,
+        "completed": 0,
+        "failed": 12,
+        "success_rate_pct": 0,
+        "p50_latency_ms": 0,
+        "p95_latency_ms": 0,
+        "p50_wait_ms": 0,
+        "p95_wait_ms": 0
+      },
+      "interactive": {
+        "total_requests": 24,
+        "completed": 2,
+        "failed": 22,
+        "success_rate_pct": 8.333333333333332,
+        "p50_latency_ms": 556.651875,
+        "p95_latency_ms": 605.286459,
+        "p50_wait_ms": 465,
+        "p95_wait_ms": 519
+      },
+      "production": {
+        "total_requests": 49,
+        "completed": 49,
+        "failed": 0,
+        "success_rate_pct": 100,
+        "p50_latency_ms": 140.317833,
+        "p95_latency_ms": 328.539375,
+        "p50_wait_ms": 50,
+        "p95_wait_ms": 244
+      }
+    },
+    "runs": {
+      "run-batch-eval": {
+        "total_requests": 12,
+        "completed": 0,
+        "failed": 12,
+        "success_rate_pct": 0,
+        "service_share_pct": 0
+      },
+      "run-bg-indexer": {
+        "total_requests": 15,
+        "completed": 0,
+        "failed": 15,
+        "success_rate_pct": 0,
+        "service_share_pct": 0
+      },
+      "run-interactive-qa": {
+        "total_requests": 24,
+        "completed": 2,
+        "failed": 22,
+        "success_rate_pct": 8.333333333333332,
+        "service_share_pct": 3.9215686274509802
+      },
+      "run-prod-assistant": {
+        "total_requests": 21,
+        "completed": 21,
+        "failed": 0,
+        "success_rate_pct": 100,
+        "service_share_pct": 41.17647058823529
+      },
+      "run-prod-checkout": {
+        "total_requests": 28,
+        "completed": 28,
+        "failed": 0,
+        "success_rate_pct": 100,
+        "service_share_pct": 54.90196078431373
+      }
+    }
+  }
+]

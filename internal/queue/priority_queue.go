@@ -14,40 +14,54 @@ var (
 	ErrItemNotFound = errors.New("queue item not found")
 )
 
-// itemHeap implements heap.Interface for Items.
-type itemHeap []*Item
+// SchedulingPolicy determines queue eviction order.
+type SchedulingPolicy string
 
-func (h itemHeap) Len() int { return len(h) }
+const (
+	PolicyPriority SchedulingPolicy = "priority"
+	PolicyFIFO     SchedulingPolicy = "fifo"
+)
+
+// itemHeap implements heap.Interface for Items.
+type itemHeap struct {
+	items  []*Item
+	policy SchedulingPolicy
+}
+
+func (h itemHeap) Len() int { return len(h.items) }
 
 func (h itemHeap) Less(i, j int) bool {
+	if h.policy == PolicyFIFO {
+		return h.items[i].Seq < h.items[j].Seq
+	}
 	// Max-heap by Priority: higher priority value first
-	if h[i].Meta.Priority != h[j].Meta.Priority {
-		return h[i].Meta.Priority > h[j].Meta.Priority
+	if h.items[i].Meta.Priority != h.items[j].Meta.Priority {
+		return h.items[i].Meta.Priority > h.items[j].Meta.Priority
 	}
 	// Strict FIFO tie-breaker on identical priority: lower sequence number first
-	return h[i].Seq < h[j].Seq
+	return h.items[i].Seq < h.items[j].Seq
 }
 
 func (h itemHeap) Swap(i, j int) {
-	h[i], h[j] = h[j], h[i]
-	h[i].Index = i
-	h[j].Index = j
+	h.items[i], h.items[j] = h.items[j], h.items[i]
+	h.items[i].Index = i
+	h.items[j].Index = j
 }
 
 func (h *itemHeap) Push(x any) {
-	n := len(*h)
+	n := len(h.items)
 	item := x.(*Item)
 	item.Index = n
-	*h = append(*h, item)
+	h.items = append(h.items, item)
 }
 
 func (h *itemHeap) Pop() any {
-	old := *h
+	old := h.items
 	n := len(old)
 	item := old[n-1]
 	old[n-1] = nil // Avoid memory leak
 	item.Index = -1
-	*h = old[0 : n-1]
+	h.items = old[0 : n-1]
 	return item
 }
 
@@ -60,13 +74,24 @@ type PriorityQueue struct {
 	seqCounter  atomic.Uint64
 }
 
-// NewPriorityQueue creates a PriorityQueue with the given maximum capacity.
+// NewPriorityQueue creates a PriorityQueue with default priority ordering.
 func NewPriorityQueue(maxCapacity int) *PriorityQueue {
+	return NewPriorityQueueWithPolicy(maxCapacity, PolicyPriority)
+}
+
+// NewPriorityQueueWithPolicy creates a PriorityQueue with the specified policy.
+func NewPriorityQueueWithPolicy(maxCapacity int, policy SchedulingPolicy) *PriorityQueue {
 	if maxCapacity <= 0 {
 		maxCapacity = 1
 	}
+	if policy == "" {
+		policy = PolicyPriority
+	}
 	pq := &PriorityQueue{
-		h:           make(itemHeap, 0),
+		h: itemHeap{
+			items:  make([]*Item, 0),
+			policy: policy,
+		},
 		itemsByID:   make(map[string]*Item),
 		maxCapacity: maxCapacity,
 	}
@@ -83,7 +108,7 @@ func (pq *PriorityQueue) Capacity() int {
 func (pq *PriorityQueue) Len() int {
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
-	return len(pq.h)
+	return len(pq.h.items)
 }
 
 // Enqueue inserts an item into the priority queue.
@@ -92,7 +117,7 @@ func (pq *PriorityQueue) Enqueue(item *Item) error {
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
 
-	if len(pq.h) >= pq.maxCapacity {
+	if len(pq.h.items) >= pq.maxCapacity {
 		return ErrQueueFull
 	}
 
@@ -108,7 +133,7 @@ func (pq *PriorityQueue) Dequeue() *Item {
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
 
-	if len(pq.h) == 0 {
+	if len(pq.h.items) == 0 {
 		return nil
 	}
 
@@ -139,8 +164,8 @@ func (pq *PriorityQueue) Peek() *Item {
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
 
-	if len(pq.h) == 0 {
+	if len(pq.h.items) == 0 {
 		return nil
 	}
-	return pq.h[0]
+	return pq.h.items[0]
 }

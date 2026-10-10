@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/model-scheduler/model-scheduler/internal/config"
+	"github.com/model-scheduler/model-scheduler/internal/queue"
 	"github.com/model-scheduler/model-scheduler/internal/scheduler"
 	"github.com/model-scheduler/model-scheduler/internal/upstream"
 )
@@ -28,6 +29,7 @@ func NewServer(cfg config.ServerConfig, client *upstream.Client, s *scheduler.Sc
 			MaxConcurrency: cfg.MaxConcurrency,
 			MaxQueueSize:   cfg.MaxQueueSize,
 			MaxQueueWait:   cfg.MaxQueueWait,
+			Policy:         queue.SchedulingPolicy(cfg.SchedulingPolicy),
 		})
 	}
 
@@ -96,3 +98,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) Scheduler() *scheduler.Scheduler {
 	return s.scheduler
 }
+
+// Handler returns the underlying http.Handler.
+func (s *Server) Handler() http.Handler {
+	return s.httpServer.Handler
+}
+

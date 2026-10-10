@@ -1,0 +1,293 @@
+[
+  {
+    "mode": "A. Direct + Retries \u0026 Jitter",
+    "total_submitted": 100,
+    "successful": 39,
+    "success_rate_pct": 39,
+    "http_429_count": 61,
+    "http_503_count": 0,
+    "http_504_count": 0,
+    "canceled_count": 0,
+    "other_failures": 0,
+    "total_retries": 241,
+    "throughput_rps": 40.14955193357411,
+    "wall_clock_duration_ms": 971.36825,
+    "p50_latency_ms": 105.51425,
+    "p95_latency_ms": 281.920834,
+    "p50_wait_ms": 0,
+    "p95_wait_ms": 0,
+    "classes": {
+      "background": {
+        "total_requests": 15,
+        "completed": 6,
+        "failed": 9,
+        "success_rate_pct": 40,
+        "p50_latency_ms": 199.806875,
+        "p95_latency_ms": 279.736333,
+        "p50_wait_ms": 0,
+        "p95_wait_ms": 0
+      },
+      "batch": {
+        "total_requests": 12,
+        "completed": 5,
+        "failed": 7,
+        "success_rate_pct": 41.66666666666667,
+        "p50_latency_ms": 158.183833,
+        "p95_latency_ms": 216.516792,
+        "p50_wait_ms": 0,
+        "p95_wait_ms": 0
+      },
+      "interactive": {
+        "total_requests": 24,
+        "completed": 8,
+        "failed": 16,
+        "success_rate_pct": 33.33333333333333,
+        "p50_latency_ms": 50.376709,
+        "p95_latency_ms": 298.270417,
+        "p50_wait_ms": 0,
+        "p95_wait_ms": 0
+      },
+      "production": {
+        "total_requests": 49,
+        "completed": 20,
+        "failed": 29,
+        "success_rate_pct": 40.816326530612244,
+        "p50_latency_ms": 99.239084,
+        "p95_latency_ms": 217.10191600000002,
+        "p50_wait_ms": 0,
+        "p95_wait_ms": 0
+      }
+    },
+    "runs": {
+      "run-batch-eval": {
+        "total_requests": 12,
+        "completed": 5,
+        "failed": 7,
+        "success_rate_pct": 41.66666666666667,
+        "service_share_pct": 12.82051282051282
+      },
+      "run-bg-indexer": {
+        "total_requests": 15,
+        "completed": 6,
+        "failed": 9,
+        "success_rate_pct": 40,
+        "service_share_pct": 15.384615384615385
+      },
+      "run-interactive-qa": {
+        "total_requests": 24,
+        "completed": 8,
+        "failed": 16,
+        "success_rate_pct": 33.33333333333333,
+        "service_share_pct": 20.51282051282051
+      },
+      "run-prod-assistant": {
+        "total_requests": 21,
+        "completed": 7,
+        "failed": 14,
+        "success_rate_pct": 33.33333333333333,
+        "service_share_pct": 17.94871794871795
+      },
+      "run-prod-checkout": {
+        "total_requests": 28,
+        "completed": 13,
+        "failed": 15,
+        "success_rate_pct": 46.42857142857143,
+        "service_share_pct": 33.33333333333333
+      }
+    }
+  },
+  {
+    "mode": "B. Bounded FIFO Scheduler",
+    "total_submitted": 100,
+    "successful": 40,
+    "success_rate_pct": 40,
+    "http_429_count": 60,
+    "http_503_count": 0,
+    "http_504_count": 0,
+    "canceled_count": 0,
+    "other_failures": 0,
+    "total_retries": 0,
+    "throughput_rps": 48.967384967196445,
+    "wall_clock_duration_ms": 816.87025,
+    "p50_latency_ms": 88.08983300000001,
+    "p95_latency_ms": 222.204042,
+    "p50_wait_ms": 0,
+    "p95_wait_ms": 191,
+    "classes": {
+      "background": {
+        "total_requests": 15,
+        "completed": 6,
+        "failed": 9,
+        "success_rate_pct": 40,
+        "p50_latency_ms": 103.61379199999999,
+        "p95_latency_ms": 212.44512500000002,
+        "p50_wait_ms": 18,
+        "p95_wait_ms": 106
+      },
+      "batch": {
+        "total_requests": 12,
+        "completed": 4,
+        "failed": 8,
+        "success_rate_pct": 33.33333333333333,
+        "p50_latency_ms": 30.782332999999998,
+        "p95_latency_ms": 215.7165,
+        "p50_wait_ms": 0,
+        "p95_wait_ms": 106
+      },
+      "interactive": {
+        "total_requests": 24,
+        "completed": 11,
+        "failed": 13,
+        "success_rate_pct": 45.83333333333333,
+        "p50_latency_ms": 25.808709,
+        "p95_latency_ms": 110.30108299999999,
+        "p50_wait_ms": 0,
+        "p95_wait_ms": 23
+      },
+      "production": {
+        "total_requests": 49,
+        "completed": 19,
+        "failed": 30,
+        "success_rate_pct": 38.775510204081634,
+        "p50_latency_ms": 93.257542,
+        "p95_latency_ms": 318.078792,
+        "p50_wait_ms": 0,
+        "p95_wait_ms": 201
+      }
+    },
+    "runs": {
+      "run-batch-eval": {
+        "total_requests": 12,
+        "completed": 4,
+        "failed": 8,
+        "success_rate_pct": 33.33333333333333,
+        "service_share_pct": 10
+      },
+      "run-bg-indexer": {
+        "total_requests": 15,
+        "completed": 6,
+        "failed": 9,
+        "success_rate_pct": 40,
+        "service_share_pct": 15
+      },
+      "run-interactive-qa": {
+        "total_requests": 24,
+        "completed": 11,
+        "failed": 13,
+        "success_rate_pct": 45.83333333333333,
+        "service_share_pct": 27.500000000000004
+      },
+      "run-prod-assistant": {
+        "total_requests": 21,
+        "completed": 11,
+        "failed": 10,
+        "success_rate_pct": 52.38095238095239,
+        "service_share_pct": 27.500000000000004
+      },
+      "run-prod-checkout": {
+        "total_requests": 28,
+        "completed": 8,
+        "failed": 20,
+        "success_rate_pct": 28.57142857142857,
+        "service_share_pct": 20
+      }
+    }
+  },
+  {
+    "mode": "C. Priority-Aware Scheduler",
+    "total_submitted": 100,
+    "successful": 40,
+    "success_rate_pct": 40,
+    "http_429_count": 60,
+    "http_503_count": 0,
+    "http_504_count": 0,
+    "canceled_count": 0,
+    "other_failures": 0,
+    "total_retries": 0,
+    "throughput_rps": 48.938703050961095,
+    "wall_clock_duration_ms": 817.349,
+    "p50_latency_ms": 84.120208,
+    "p95_latency_ms": 140.872666,
+    "p50_wait_ms": 0,
+    "p95_wait_ms": 97,
+    "classes": {
+      "background": {
+        "total_requests": 15,
+        "completed": 2,
+        "failed": 13,
+        "success_rate_pct": 13.333333333333334,
+        "p50_latency_ms": 29.052000000000003,
+        "p95_latency_ms": 88.26299999999999,
+        "p50_wait_ms": 0,
+        "p95_wait_ms": 0
+      },
+      "batch": {
+        "total_requests": 12,
+        "completed": 4,
+        "failed": 8,
+        "success_rate_pct": 33.33333333333333,
+        "p50_latency_ms": 30.723209,
+        "p95_latency_ms": 95.44500000000001,
+        "p50_wait_ms": 0,
+        "p95_wait_ms": 0
+      },
+      "interactive": {
+        "total_requests": 24,
+        "completed": 10,
+        "failed": 14,
+        "success_rate_pct": 41.66666666666667,
+        "p50_latency_ms": 25.54325,
+        "p95_latency_ms": 103.129417,
+        "p50_wait_ms": 0,
+        "p95_wait_ms": 0
+      },
+      "production": {
+        "total_requests": 49,
+        "completed": 24,
+        "failed": 25,
+        "success_rate_pct": 48.97959183673469,
+        "p50_latency_ms": 99.362583,
+        "p95_latency_ms": 212.202584,
+        "p50_wait_ms": 0,
+        "p95_wait_ms": 98
+      }
+    },
+    "runs": {
+      "run-batch-eval": {
+        "total_requests": 12,
+        "completed": 4,
+        "failed": 8,
+        "success_rate_pct": 33.33333333333333,
+        "service_share_pct": 10
+      },
+      "run-bg-indexer": {
+        "total_requests": 15,
+        "completed": 2,
+        "failed": 13,
+        "success_rate_pct": 13.333333333333334,
+        "service_share_pct": 5
+      },
+      "run-interactive-qa": {
+        "total_requests": 24,
+        "completed": 10,
+        "failed": 14,
+        "success_rate_pct": 41.66666666666667,
+        "service_share_pct": 25
+      },
+      "run-prod-assistant": {
+        "total_requests": 21,
+        "completed": 14,
+        "failed": 7,
+        "success_rate_pct": 66.66666666666666,
+        "service_share_pct": 35
+      },
+      "run-prod-checkout": {
+        "total_requests": 28,
+        "completed": 10,
+        "failed": 18,
+        "success_rate_pct": 35.714285714285715,
+        "service_share_pct": 25
+      }
+    }
+  }
+]

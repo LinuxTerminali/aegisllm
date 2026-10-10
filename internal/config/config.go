@@ -9,29 +9,31 @@ import (
 
 // ServerConfig stores the complete configuration for the scheduler service.
 type ServerConfig struct {
-	ListenAddr      string
-	UpstreamURL     string
-	UpstreamAPIKey  string
-	MaxConcurrency  int
-	MaxQueueSize    int
-	MaxQueueWait    time.Duration
-	RunMockUpstream bool
-	MockAddr        string
-	MockLatency     time.Duration
+	ListenAddr       string
+	UpstreamURL      string
+	UpstreamAPIKey   string
+	MaxConcurrency   int
+	MaxQueueSize     int
+	MaxQueueWait     time.Duration
+	RunMockUpstream  bool
+	MockAddr         string
+	MockLatency      time.Duration
+	SchedulingPolicy string
 }
 
 // DefaultConfig returns safe default settings.
 func DefaultConfig() ServerConfig {
 	return ServerConfig{
-		ListenAddr:      ":8080",
-		UpstreamURL:     "http://127.0.0.1:8081",
-		UpstreamAPIKey:  "",
-		MaxConcurrency:  5,
-		MaxQueueSize:    100,
-		MaxQueueWait:    30 * time.Second,
-		RunMockUpstream: false,
-		MockAddr:        ":8081",
-		MockLatency:     30 * time.Millisecond,
+		ListenAddr:       ":8080",
+		UpstreamURL:      "http://127.0.0.1:8081",
+		UpstreamAPIKey:   "",
+		MaxConcurrency:   5,
+		MaxQueueSize:     100,
+		MaxQueueWait:     30 * time.Second,
+		RunMockUpstream:  false,
+		MockAddr:         ":8081",
+		MockLatency:      30 * time.Millisecond,
+		SchedulingPolicy: "priority",
 	}
 }
 
@@ -50,6 +52,7 @@ func ParseFlags(args []string) (ServerConfig, error) {
 	fs.BoolVar(&cfg.RunMockUpstream, "run-mock", getEnvBool("SCHEDULER_RUN_MOCK", cfg.RunMockUpstream), "Start embedded mock upstream provider")
 	fs.StringVar(&cfg.MockAddr, "mock-addr", getEnv("SCHEDULER_MOCK_ADDR", cfg.MockAddr), "Address for embedded mock upstream server")
 	fs.DurationVar(&cfg.MockLatency, "mock-latency", getEnvDuration("SCHEDULER_MOCK_LATENCY", cfg.MockLatency), "Simulated inference latency for mock provider")
+	fs.StringVar(&cfg.SchedulingPolicy, "scheduling-policy", getEnv("SCHEDULER_SCHEDULING_POLICY", cfg.SchedulingPolicy), "Queue scheduling policy: 'priority' or 'fifo'")
 
 	if err := fs.Parse(args); err != nil {
 		return cfg, err

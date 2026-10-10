@@ -140,6 +140,70 @@ func TestScheduler_PriorityOrder(t *testing.T) {
 	}
 }
 
+func TestScheduler_FIFOOrder(t *testing.T) {
+	sched := NewScheduler(Config{
+		MaxConcurrency: 1,
+		MaxQueueSize:   10,
+		MaxQueueWait:   5 * time.Second,
+		Policy:         "fifo",
+	})
+
+	blockerLease, err := sched.Acquire(context.Background(), model.RequestMetadata{RequestID: "blocker", Priority: 50})
+	if err != nil {
+		t.Fatalf("failed to acquire blocker: %v", err)
+	}
+
+	var executionOrder []string
+	var orderMu sync.Mutex
+	var wg sync.WaitGroup
+
+	reqs := []struct {
+		id       string
+		priority int
+	}{
+		{"batch-1", model.PriorityBatch},             // 25, arrives first
+		{"production-1", model.PriorityProduction},   // 100, arrives second
+		{"interactive-1", model.PriorityInteractive}, // 75, arrives third
+	}
+
+	for _, req := range reqs {
+		wg.Add(1)
+		go func(r struct {
+			id       string
+			priority int
+		}) {
+			defer wg.Done()
+			lease, err := sched.Acquire(context.Background(), model.RequestMetadata{
+				RequestID: r.id,
+				Priority:  r.priority,
+			})
+			if err != nil {
+				t.Errorf("failed to acquire %s: %v", r.id, err)
+				return
+			}
+			defer lease.Release()
+
+			orderMu.Lock()
+			executionOrder = append(executionOrder, r.id)
+			orderMu.Unlock()
+		}(req)
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	blockerLease.Release()
+	wg.Wait()
+
+	expected := []string{"batch-1", "production-1", "interactive-1"}
+	if len(executionOrder) != len(expected) {
+		t.Fatalf("expected %d executions, got %d", len(expected), len(executionOrder))
+	}
+	for i, exp := range expected {
+		if executionOrder[i] != exp {
+			t.Errorf("step %d: expected %s, got %s", i, exp, executionOrder[i])
+		}
+	}
+}
+
 func TestScheduler_QueueCapacityRejection(t *testing.T) {
 	sched := NewScheduler(Config{
 		MaxConcurrency: 1,
