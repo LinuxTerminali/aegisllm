@@ -1,2 +1,33 @@
+# Binaries and build artifacts
 bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
 *.test
+*.out
+
+# Coverage
+coverage.txt
+coverage.html
+profile.out
+
+# IDEs and Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment / local secrets
+.env
+.env.*
+!.env.example
+
+# Temporary / logs
+*.log
+scratch/
+tmp/

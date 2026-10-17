@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/model-scheduler/model-scheduler/internal/model"
+	"github.com/LinuxTerminali/aegisllm/internal/model"
 )
 
 // Item represents a waiting request inside the priority queue.

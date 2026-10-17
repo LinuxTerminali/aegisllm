@@ -8,7 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/model-scheduler/model-scheduler/internal/model"
+	"github.com/LinuxTerminali/aegisllm/internal/model"
+	"github.com/LinuxTerminali/aegisllm/internal/queue"
 )
 
 func TestScheduler_ConcurrencyLimit(t *testing.T) {
@@ -32,7 +33,7 @@ func TestScheduler_ConcurrencyLimit(t *testing.T) {
 				RequestID: fmt.Sprintf("req-%d", id),
 				Priority:  50,
 			}
-			lease, err := sched.Acquire(context.Background(), meta)
+			lease, err := sched.Acquire(context.Background(), meta, nil)
 			if err != nil {
 				t.Errorf("failed to acquire lease: %v", err)
 				return
@@ -81,7 +82,7 @@ func TestScheduler_PriorityOrder(t *testing.T) {
 	})
 
 	// Hold the slot
-	blockerLease, err := sched.Acquire(context.Background(), model.RequestMetadata{RequestID: "blocker", Priority: 50})
+	blockerLease, err := sched.Acquire(context.Background(), model.RequestMetadata{RequestID: "blocker", Priority: 50}, nil)
 	if err != nil {
 		t.Fatalf("failed to acquire blocker: %v", err)
 	}
@@ -110,7 +111,7 @@ func TestScheduler_PriorityOrder(t *testing.T) {
 			lease, err := sched.Acquire(context.Background(), model.RequestMetadata{
 				RequestID: r.id,
 				Priority:  r.priority,
-			})
+			}, nil)
 			if err != nil {
 				t.Errorf("failed to acquire %s: %v", r.id, err)
 				return
@@ -148,7 +149,7 @@ func TestScheduler_FIFOOrder(t *testing.T) {
 		Policy:         "fifo",
 	})
 
-	blockerLease, err := sched.Acquire(context.Background(), model.RequestMetadata{RequestID: "blocker", Priority: 50})
+	blockerLease, err := sched.Acquire(context.Background(), model.RequestMetadata{RequestID: "blocker", Priority: 50}, nil)
 	if err != nil {
 		t.Fatalf("failed to acquire blocker: %v", err)
 	}
@@ -176,7 +177,7 @@ func TestScheduler_FIFOOrder(t *testing.T) {
 			lease, err := sched.Acquire(context.Background(), model.RequestMetadata{
 				RequestID: r.id,
 				Priority:  r.priority,
-			})
+			}, nil)
 			if err != nil {
 				t.Errorf("failed to acquire %s: %v", r.id, err)
 				return
@@ -212,7 +213,7 @@ func TestScheduler_QueueCapacityRejection(t *testing.T) {
 	})
 
 	// Hold the 1 concurrency slot
-	blocker, err := sched.Acquire(context.Background(), model.RequestMetadata{RequestID: "b", Priority: 50})
+	blocker, err := sched.Acquire(context.Background(), model.RequestMetadata{RequestID: "b", Priority: 50}, nil)
 	if err != nil {
 		t.Fatalf("failed to acquire blocker: %v", err)
 	}
@@ -227,7 +228,7 @@ func TestScheduler_QueueCapacityRejection(t *testing.T) {
 			lease, err := sched.Acquire(context.Background(), model.RequestMetadata{
 				RequestID: fmt.Sprintf("queued-%d", id),
 				Priority:  50,
-			})
+			}, nil)
 			if err != nil {
 				return
 			}
@@ -242,7 +243,7 @@ func TestScheduler_QueueCapacityRejection(t *testing.T) {
 	}
 
 	// 3rd queued request should be rejected immediately with ErrQueueFull
-	_, err = sched.Acquire(context.Background(), model.RequestMetadata{RequestID: "overflow", Priority: 100})
+	_, err = sched.Acquire(context.Background(), model.RequestMetadata{RequestID: "overflow", Priority: 100}, nil)
 	if err != ErrQueueFull {
 		t.Fatalf("expected ErrQueueFull, got %v", err)
 	}
@@ -263,14 +264,14 @@ func TestScheduler_CancellationWhileQueued(t *testing.T) {
 	})
 
 	// Hold concurrency slot
-	blocker, _ := sched.Acquire(context.Background(), model.RequestMetadata{RequestID: "b", Priority: 50})
+	blocker, _ := sched.Acquire(context.Background(), model.RequestMetadata{RequestID: "b", Priority: 50}, nil)
 	defer blocker.Release()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := sched.Acquire(ctx, model.RequestMetadata{RequestID: "canceled-req", Priority: 50})
+		_, err := sched.Acquire(ctx, model.RequestMetadata{RequestID: "canceled-req", Priority: 50}, nil)
 		errCh <- err
 	}()
 
@@ -303,15 +304,117 @@ func TestScheduler_WaitTimeout(t *testing.T) {
 	})
 
 	// Hold concurrency slot
-	blocker, _ := sched.Acquire(context.Background(), model.RequestMetadata{RequestID: "b", Priority: 50})
+	blocker, _ := sched.Acquire(context.Background(), model.RequestMetadata{RequestID: "b", Priority: 50}, nil)
 	defer blocker.Release()
 
-	_, err := sched.Acquire(context.Background(), model.RequestMetadata{RequestID: "timeout-req", Priority: 50})
+	_, err := sched.Acquire(context.Background(), model.RequestMetadata{RequestID: "timeout-req", Priority: 50}, nil)
 	if err != ErrWaitTimeout {
 		t.Fatalf("expected ErrWaitTimeout, got %v", err)
 	}
 
 	if sched.Stats().TotalTimedOut != 1 {
 		t.Fatalf("expected 1 total timed out, got %d", sched.Stats().TotalTimedOut)
+	}
+}
+
+func TestScheduler_FairPolicy(t *testing.T) {
+	sched := NewScheduler(Config{
+		MaxConcurrency: 1,
+		MaxQueueSize:   10,
+		MaxQueueWait:   5 * time.Second,
+		Policy:         queue.PolicyFair,
+	})
+
+	// Block the single concurrency slot
+	blocker, err := sched.Acquire(context.Background(), model.RequestMetadata{RequestID: "blocker", Priority: 50}, nil)
+	if err != nil {
+		t.Fatalf("failed to acquire blocker: %v", err)
+	}
+
+	var executionOrder []string
+	var orderMu sync.Mutex
+	var wg sync.WaitGroup
+
+	reqs := []struct {
+		id    string
+		runID string
+	}{
+		{"A-1", "run-A"},
+		{"A-2", "run-A"},
+		{"B-1", "run-B"},
+		{"A-3", "run-A"},
+		{"B-2", "run-B"},
+	}
+
+	for _, r := range reqs {
+		wg.Add(1)
+		go func(id, runID string) {
+			defer wg.Done()
+			lease, err := sched.Acquire(context.Background(), model.RequestMetadata{
+				RequestID: id,
+				RunID:     runID,
+				Priority:  model.PriorityProduction,
+			}, nil)
+			if err != nil {
+				t.Errorf("failed to acquire %s: %v", id, err)
+				return
+			}
+			defer lease.Release()
+
+			orderMu.Lock()
+			executionOrder = append(executionOrder, id)
+			orderMu.Unlock()
+		}(r.id, r.runID)
+		time.Sleep(10 * time.Millisecond) // deterministic arrival
+	}
+
+	// Release blocker to dispatch queued requests
+	blocker.Release()
+	wg.Wait()
+
+	// In fair queueing, Run A and Run B must interleave turns:
+	// A-1, B-1, A-2, B-2, A-3
+	expected := []string{"A-1", "B-1", "A-2", "B-2", "A-3"}
+	if len(executionOrder) != len(expected) {
+		t.Fatalf("expected %d executions, got %d (%v)", len(expected), len(executionOrder), executionOrder)
+	}
+	for i, exp := range expected {
+		if executionOrder[i] != exp {
+			t.Errorf("step %d: expected %s, got %s", i, exp, executionOrder[i])
+		}
+	}
+}
+
+func TestScheduler_DistinguishableRejections(t *testing.T) {
+	sched := NewScheduler(Config{
+		MaxConcurrency: 1,
+		MaxQueueSize:   1,
+		MaxQueueWait:   5 * time.Second,
+	})
+
+	blocker, _ := sched.Acquire(context.Background(), model.RequestMetadata{RequestID: "b", Priority: 50}, nil)
+	defer blocker.Release()
+
+	// Fill queue to capacity (1)
+	go func() {
+		lease, _ := sched.Acquire(context.Background(), model.RequestMetadata{RequestID: "queued-1", Priority: 50}, nil)
+		if lease != nil {
+			defer lease.Release()
+		}
+	}()
+	time.Sleep(30 * time.Millisecond)
+
+	// 2nd queued request must be rejected with ErrQueueFull
+	_, err := sched.Acquire(context.Background(), model.RequestMetadata{RequestID: "overflow", Priority: 50}, nil)
+	if err != ErrQueueFull {
+		t.Fatalf("expected ErrQueueFull, got %v", err)
+	}
+
+	stats := sched.Stats()
+	if stats.TotalRejectedQueueFull != 1 {
+		t.Errorf("expected TotalRejectedQueueFull=1, got %d", stats.TotalRejectedQueueFull)
+	}
+	if stats.TotalRejected != 1 {
+		t.Errorf("expected TotalRejected=1, got %d", stats.TotalRejected)
 	}
 }

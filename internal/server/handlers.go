@@ -1,35 +1,57 @@
 package server
 
 import (
-	"crypto/rand"
+	crand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	mathrand "math/rand"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
-	"github.com/model-scheduler/model-scheduler/internal/model"
-	"github.com/model-scheduler/model-scheduler/internal/scheduler"
-	"github.com/model-scheduler/model-scheduler/internal/upstream"
+	"github.com/LinuxTerminali/aegisllm/internal/capacity"
+	"github.com/LinuxTerminali/aegisllm/internal/metrics"
+	"github.com/LinuxTerminali/aegisllm/internal/model"
+	"github.com/LinuxTerminali/aegisllm/internal/retry"
+	"github.com/LinuxTerminali/aegisllm/internal/scheduler"
+	"github.com/LinuxTerminali/aegisllm/internal/upstream"
 )
 
-const maxRequestBodySize = 10 * 1024 * 1024 // 10MB limit
+const (
+	maxRequestBodySize  = 10 * 1024 * 1024 // 10MB limit
+	maxResponseBodySize = 10 * 1024 * 1024 // 10MB limit
+)
+
+// StatusResponse encapsulates complete runtime health, capacity, queue depths, and metrics.
+type StatusResponse struct {
+	scheduler.Stats
+	Metrics  metrics.StatsSnapshot `json:"metrics"`
+	Provider string                `json:"provider"`
+}
 
 // Handlers holds dependencies for HTTP route handlers.
 type Handlers struct {
 	scheduler      *scheduler.Scheduler
 	upstreamClient *upstream.Client
+	retryPolicy    retry.Policy
+	metrics        *metrics.Collector
 }
 
 // NewHandlers creates a new Handlers container.
-func NewHandlers(s *scheduler.Scheduler, client *upstream.Client) *Handlers {
+func NewHandlers(s *scheduler.Scheduler, client *upstream.Client, rp retry.Policy, m *metrics.Collector) *Handlers {
+	if m == nil {
+		m = metrics.NewCollector()
+	}
 	return &Handlers{
 		scheduler:      s,
 		upstreamClient: client,
+		retryPolicy:    rp,
+		metrics:        m,
 	}
 }
 
@@ -44,16 +66,55 @@ func (h *Handlers) Healthz(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
-// Status returns current scheduler operational metrics and queue depths.
+// Status returns current scheduler operational metrics, queue depths, and observability snapshots.
 func (h *Handlers) Status(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		model.WriteJSONError(w, http.StatusMethodNotAllowed, "Method not allowed", "invalid_request_error", 405)
 		return
 	}
 	stats := h.scheduler.Stats()
+	provName := "unknown"
+	if h.upstreamClient != nil && h.upstreamClient.Provider() != nil {
+		provName = h.upstreamClient.Provider().Name()
+	}
+
+	resp := StatusResponse{
+		Stats:    stats,
+		Metrics:  h.metrics.Snapshot(),
+		Provider: provName,
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(stats)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// Metrics exports Prometheus-compatible exposition metrics with strictly bounded cardinality.
+func (h *Handlers) Metrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		model.WriteJSONError(w, http.StatusMethodNotAllowed, "Method not allowed", "invalid_request_error", 405)
+		return
+	}
+
+	stats := h.scheduler.Stats()
+	out := h.metrics.FormatPrometheus(
+		stats.ActiveRequests,
+		stats.MaxConcurrency,
+		stats.QueuedRequests,
+		stats.MaxQueueCapacity,
+		stats.Capacity.AvailableRequestTokens,
+		stats.Capacity.MaxRequestCapacity,
+		stats.Capacity.AvailableTokenTokens,
+		stats.Capacity.MaxTokenCapacity,
+		stats.Capacity.TotalReservations,
+		stats.Capacity.TotalPacedRequests,
+		stats.Capacity.TotalTokensReserved,
+		stats.Capacity.TotalTokensReconciled,
+	)
+
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(out))
 }
 
 // ChatCompletions coordinates admission and proxies OpenAI chat completion requests.
@@ -91,19 +152,29 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = r.Body.Close()
 
-	// 4. Acquire execution lease from scheduler
-	lease, err := h.scheduler.Acquire(r.Context(), meta)
+	// 4. Acquire execution lease from scheduler (with body for token estimation)
+	lease, err := h.scheduler.Acquire(r.Context(), meta, bodyBytes)
 	if err != nil {
 		if errors.Is(err, scheduler.ErrQueueFull) {
+			h.metrics.RecordRejection("queue_full")
+			w.Header().Set("X-Scheduler-Error", "queue_full")
 			model.WriteJSONError(w, http.StatusServiceUnavailable, "Scheduler queue is full, capacity exceeded", "capacity_exceeded", 503)
 			return
 		}
+		if errors.Is(err, capacity.ErrInsufficientCapacity) {
+			h.metrics.RecordRejection("capacity_exceeded")
+			w.Header().Set("X-Scheduler-Error", "capacity_exceeded")
+			model.WriteJSONError(w, http.StatusTooManyRequests, "Capacity rate limit quota exhausted and pacing delay exceeded", "rate_limit_exceeded", 429)
+			return
+		}
 		if errors.Is(err, scheduler.ErrWaitTimeout) {
+			h.metrics.RecordRejection("queue_timeout")
+			w.Header().Set("X-Scheduler-Error", "queue_timeout")
 			model.WriteJSONError(w, http.StatusGatewayTimeout, "Request exceeded maximum queue wait time", "timeout_error", 504)
 			return
 		}
 		if errors.Is(err, r.Context().Err()) {
-			// Client disconnected while waiting
+			h.metrics.RecordCanceled()
 			return
 		}
 		model.WriteJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Scheduling error: %v", err), "server_error", 500)
@@ -111,20 +182,92 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer lease.Release()
 
-	// 5. Forward request to upstream LLM provider
+	h.metrics.RecordAccepted(meta.Priority, lease.WaitDuration())
+
+	// 5. Forward with coordinated retry loop
 	upstreamStart := time.Now()
-	resp, err := h.upstreamClient.Forward(r.Context(), r.URL.Path, r.Header, bodyBytes)
-	if err != nil {
-		if errors.Is(err, r.Context().Err()) {
+	rng := mathrand.New(mathrand.NewSource(time.Now().UnixNano()))
+	var resp *http.Response
+	var forwardErr error
+	retriesCount := 0
+
+	for attempt := 0; attempt <= h.retryPolicy.MaxRetries; attempt++ {
+		if r.Context().Err() != nil {
+			h.metrics.RecordCanceled()
 			return
 		}
-		model.WriteJSONError(w, http.StatusBadGateway, fmt.Sprintf("Upstream provider error: %v", err), "bad_gateway", 502)
+
+		if attempt > 0 {
+			retriesCount++
+			h.metrics.RecordRetry()
+
+			// Parse Retry-After from previous response
+			var retryAfter time.Duration
+			if resp != nil {
+				if ra, ok := upstream.ParseRetryAfter(resp.Header.Get("Retry-After")); ok {
+					retryAfter = ra
+				}
+			}
+			backoff := h.retryPolicy.CalculateBackoff(attempt-1, retryAfter, rng)
+			timer := time.NewTimer(backoff)
+			select {
+			case <-timer.C:
+			case <-r.Context().Done():
+				timer.Stop()
+				h.metrics.RecordCanceled()
+				return
+			}
+		}
+
+		resp, forwardErr = h.upstreamClient.Forward(r.Context(), r.URL.Path, r.Header, bodyBytes)
+		if forwardErr != nil {
+			if errors.Is(forwardErr, r.Context().Err()) {
+				h.metrics.RecordCanceled()
+				return
+			}
+			// Network error on non-first attempt - keep retrying
+			if attempt < h.retryPolicy.MaxRetries {
+				continue
+			}
+			h.metrics.RecordFailed(http.StatusBadGateway)
+			model.WriteJSONError(w, http.StatusBadGateway, fmt.Sprintf("Upstream provider error: %v", forwardErr), "bad_gateway", 502)
+			return
+		}
+
+		// Reconcile provider headers after every upstream response
+		h.scheduler.ReconcileHeaders(resp.Header)
+
+		if !retry.IsRetryable(resp.StatusCode) || attempt == h.retryPolicy.MaxRetries {
+			break
+		}
+
+		// Retryable status (429, 502, 503, 504) - close body before retry
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+
+	if forwardErr != nil {
+		h.metrics.RecordFailed(http.StatusBadGateway)
+		model.WriteJSONError(w, http.StatusBadGateway, fmt.Sprintf("Upstream provider error: %v", forwardErr), "bad_gateway", 502)
 		return
 	}
 	defer resp.Body.Close()
 
-	// 6. Copy upstream response headers
+	// 6. Read bounded response body
+	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
+	if readErr == nil && resp.StatusCode == http.StatusOK {
+		var chatResp upstream.ChatCompletionResponse
+		if json.Unmarshal(respBody, &chatResp) == nil && chatResp.Usage.TotalTokens > 0 {
+			lease.Reconcile(chatResp.Usage.TotalTokens)
+		}
+	}
+
+	// 7. Copy upstream response headers (stripping hop-by-hop headers)
 	for k, vv := range resp.Header {
+		lower := strings.ToLower(k)
+		if lower == "connection" || lower == "transfer-encoding" || lower == "content-length" {
+			continue
+		}
 		for _, v := range vv {
 			w.Header().Add(k, v)
 		}
@@ -134,13 +277,27 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Scheduler-Wait-Ms", strconv.FormatInt(lease.WaitDuration().Milliseconds(), 10))
 	w.Header().Set("X-Scheduler-Run-ID", meta.RunID)
 	w.Header().Set("X-Scheduler-Priority", strconv.Itoa(meta.Priority))
+	w.Header().Set("X-Scheduler-Retries", strconv.Itoa(retriesCount))
 
-	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
-
-	// Safe structured logging: NEVER log API keys, prompts, or response bodies!
 	totalDur := time.Since(start)
 	upstreamDur := time.Since(upstreamStart)
+
+	if resp.StatusCode == http.StatusOK {
+		w.WriteHeader(resp.StatusCode)
+		if readErr == nil {
+			if _, writeErr := w.Write(respBody); writeErr != nil {
+				h.metrics.RecordCanceled()
+			}
+		}
+		h.metrics.RecordCompleted(totalDur, upstreamDur, resp.StatusCode)
+	} else {
+		h.metrics.RecordFailed(resp.StatusCode)
+		// Sanitize error before returning to client so no API keys, internal paths, or credentials leak
+		safeMsg, errType := h.upstreamClient.SanitizeError(resp.StatusCode, respBody)
+		model.WriteJSONError(w, resp.StatusCode, safeMsg, errType, resp.StatusCode)
+	}
+
+	// Safe structured logging: NEVER log API keys, prompts, or response bodies!
 	log.Printf("[SCHEDULER] req_id=%s run_id=%s class=%s priority=%d wait_ms=%d upstream_ms=%d total_ms=%d status=%d",
 		meta.RequestID,
 		meta.RunID,
@@ -155,7 +312,7 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 func generateRequestID() string {
 	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
+	if _, err := crand.Read(b); err != nil {
 		return fmt.Sprintf("req-%d", time.Now().UnixNano())
 	}
 	return "req-" + hex.EncodeToString(b)

@@ -20,6 +20,7 @@ type SchedulingPolicy string
 const (
 	PolicyPriority SchedulingPolicy = "priority"
 	PolicyFIFO     SchedulingPolicy = "fifo"
+	PolicyFair     SchedulingPolicy = "fair"
 )
 
 // itemHeap implements heap.Interface for Items.
@@ -68,10 +69,12 @@ func (h *itemHeap) Pop() any {
 // PriorityQueue provides a concurrency-safe, bounded priority queue.
 type PriorityQueue struct {
 	mu          sync.Mutex
+	policy      SchedulingPolicy
 	h           itemHeap
 	itemsByID   map[string]*Item
 	maxCapacity int
 	seqCounter  atomic.Uint64
+	fairQ       *FairQueue
 }
 
 // NewPriorityQueue creates a PriorityQueue with default priority ordering.
@@ -81,13 +84,20 @@ func NewPriorityQueue(maxCapacity int) *PriorityQueue {
 
 // NewPriorityQueueWithPolicy creates a PriorityQueue with the specified policy.
 func NewPriorityQueueWithPolicy(maxCapacity int, policy SchedulingPolicy) *PriorityQueue {
+	return NewPriorityQueueWithWeights(maxCapacity, policy, nil)
+}
+
+// NewPriorityQueueWithWeights creates a PriorityQueue with policy and optional priority class weights.
+func NewPriorityQueueWithWeights(maxCapacity int, policy SchedulingPolicy, weights map[int]int) *PriorityQueue {
 	if maxCapacity <= 0 {
 		maxCapacity = 1
 	}
 	if policy == "" {
 		policy = PolicyPriority
 	}
+
 	pq := &PriorityQueue{
+		policy: policy,
 		h: itemHeap{
 			items:  make([]*Item, 0),
 			policy: policy,
@@ -95,17 +105,29 @@ func NewPriorityQueueWithPolicy(maxCapacity int, policy SchedulingPolicy) *Prior
 		itemsByID:   make(map[string]*Item),
 		maxCapacity: maxCapacity,
 	}
-	heap.Init(&pq.h)
+
+	if policy == PolicyFair {
+		pq.fairQ = NewFairQueue(maxCapacity, weights)
+	} else {
+		heap.Init(&pq.h)
+	}
+
 	return pq
 }
 
 // Capacity returns the maximum capacity of the queue.
 func (pq *PriorityQueue) Capacity() int {
+	if pq.policy == PolicyFair && pq.fairQ != nil {
+		return pq.fairQ.Capacity()
+	}
 	return pq.maxCapacity
 }
 
 // Len returns the current number of queued items.
 func (pq *PriorityQueue) Len() int {
+	if pq.policy == PolicyFair && pq.fairQ != nil {
+		return pq.fairQ.Len()
+	}
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
 	return len(pq.h.items)
@@ -114,6 +136,10 @@ func (pq *PriorityQueue) Len() int {
 // Enqueue inserts an item into the priority queue.
 // Returns ErrQueueFull if the queue has reached maxCapacity.
 func (pq *PriorityQueue) Enqueue(item *Item) error {
+	if pq.policy == PolicyFair && pq.fairQ != nil {
+		return pq.fairQ.Enqueue(item)
+	}
+
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
 
@@ -127,9 +153,13 @@ func (pq *PriorityQueue) Enqueue(item *Item) error {
 	return nil
 }
 
-// Dequeue removes and returns the highest priority item from the queue.
+// Dequeue removes and returns the highest priority or fairest item from the queue.
 // If the queue is empty, returns nil.
 func (pq *PriorityQueue) Dequeue() *Item {
+	if pq.policy == PolicyFair && pq.fairQ != nil {
+		return pq.fairQ.Dequeue()
+	}
+
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
 
@@ -145,6 +175,10 @@ func (pq *PriorityQueue) Dequeue() *Item {
 // Remove removes a specific item by its ID.
 // This is used when a request context is canceled or times out while waiting.
 func (pq *PriorityQueue) Remove(id string) (*Item, error) {
+	if pq.policy == PolicyFair && pq.fairQ != nil {
+		return pq.fairQ.Remove(id)
+	}
+
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
 
@@ -161,6 +195,11 @@ func (pq *PriorityQueue) Remove(id string) (*Item, error) {
 // Peek returns the highest priority item without removing it.
 // Returns nil if queue is empty.
 func (pq *PriorityQueue) Peek() *Item {
+	if pq.policy == PolicyFair && pq.fairQ != nil {
+		// FairQueue does not expose Peek because Deficit Round-Robin state advances on Dequeue
+		return nil
+	}
+
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
 
@@ -168,4 +207,34 @@ func (pq *PriorityQueue) Peek() *Item {
 		return nil
 	}
 	return pq.h.items[0]
+}
+
+// Stats returns snapshot queue depth statistics by priority and run.
+func (pq *PriorityQueue) Stats() FairQueueStats {
+	if pq.policy == PolicyFair && pq.fairQ != nil {
+		return pq.fairQ.Stats()
+	}
+
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+
+	byPriority := make(map[string]int)
+	byRun := make(map[string]int)
+	for _, it := range pq.h.items {
+		byPriority[priorityToClass(it.Meta.Priority)]++
+		runID := it.Meta.RunID
+		if runID == "" {
+			runID = UnspecifiedRunID
+		}
+		if len(byRun) < 20 {
+			byRun[runID]++
+		}
+	}
+
+	return FairQueueStats{
+		TotalQueued:      len(pq.h.items),
+		QueuedByPriority: byPriority,
+		QueuedByRun:      byRun,
+		ActiveRunsCount:  len(byRun),
+	}
 }

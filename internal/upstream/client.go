@@ -1,7 +1,6 @@
 package upstream
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -12,20 +11,26 @@ import (
 
 // ClientConfig holds configuration for the upstream client.
 type ClientConfig struct {
-	BaseURL    string
-	APIKey     string
-	HTTPClient *http.Client
-	Timeout    time.Duration
+	BaseURL          string
+	APIKey           string
+	ProviderType     string // "openai" (default), "anthropic", "azure", "generic"
+	AuthHeaderName   string
+	AuthHeaderPrefix string
+	DefaultModel     string
+	HTTPClient       *http.Client
+	Timeout          time.Duration
+	Provider         Provider
 }
 
-// Client forwards requests to an upstream LLM provider.
+// Client forwards requests to an upstream LLM provider using a provider adapter.
 type Client struct {
 	baseURL    *url.URL
 	apiKey     string
+	provider   Provider
 	httpClient *http.Client
 }
 
-// NewClient creates a new upstream Client.
+// NewClient creates a new upstream Client with the resolved provider adapter.
 func NewClient(cfg ClientConfig) (*Client, error) {
 	parsedURL, err := url.Parse(strings.TrimRight(cfg.BaseURL, "/"))
 	if err != nil {
@@ -34,52 +39,46 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{
-			Timeout: cfg.Timeout,
+		timeout := cfg.Timeout
+		if timeout <= 0 {
+			timeout = 60 * time.Second
 		}
+		httpClient = &http.Client{
+			Timeout: timeout,
+		}
+	}
+
+	prov := cfg.Provider
+	if prov == nil {
+		prov = ResolveProvider(cfg.ProviderType, cfg.APIKey, cfg.AuthHeaderName, cfg.AuthHeaderPrefix, cfg.DefaultModel)
 	}
 
 	return &Client{
 		baseURL:    parsedURL,
 		apiKey:     cfg.APIKey,
+		provider:   prov,
 		httpClient: httpClient,
 	}, nil
 }
 
-// Forward sends the incoming request to the upstream LLM provider.
-// It preserves request body, headers (omitting internal hop-by-hop headers),
-// and adds Authorization if an API key is configured.
+// Provider returns the configured provider adapter.
+func (c *Client) Provider() Provider {
+	return c.provider
+}
+
+// SanitizeError delegates error sanitization to the provider adapter.
+func (c *Client) SanitizeError(statusCode int, body []byte) (string, string) {
+	if c.provider != nil {
+		return c.provider.SanitizeError(statusCode, body)
+	}
+	return "Upstream provider error", "upstream_error"
+}
+
+// Forward sends the incoming request to the upstream LLM provider via the adapter.
 func (c *Client) Forward(ctx context.Context, path string, incomingHeader http.Header, body []byte) (*http.Response, error) {
-	targetURL := *c.baseURL
-	targetURL.Path = strings.TrimRight(targetURL.Path, "/") + path
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL.String(), bytes.NewReader(body))
+	req, err := c.provider.PrepareRequest(ctx, c.baseURL, path, incomingHeader, body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create upstream request: %w", err)
-	}
-
-	// Copy headers
-	for k, v := range incomingHeader {
-		// Skip internal scheduling headers and hop-by-hop headers
-		lower := strings.ToLower(k)
-		if strings.HasPrefix(lower, "x-run-id") ||
-			strings.HasPrefix(lower, "x-workload-class") ||
-			strings.HasPrefix(lower, "x-priority") ||
-			lower == "host" ||
-			lower == "connection" ||
-			lower == "content-length" {
-			continue
-		}
-		for _, val := range v {
-			req.Header.Add(k, val)
-		}
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	// Inject upstream API key if configured and not already set
-	if c.apiKey != "" && req.Header.Get("Authorization") == "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		return nil, err
 	}
 
 	resp, err := c.httpClient.Do(req)

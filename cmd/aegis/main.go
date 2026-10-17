@@ -11,9 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/model-scheduler/model-scheduler/internal/config"
-	"github.com/model-scheduler/model-scheduler/internal/server"
-	"github.com/model-scheduler/model-scheduler/internal/upstream"
+	"github.com/LinuxTerminali/aegisllm/internal/config"
+	"github.com/LinuxTerminali/aegisllm/internal/server"
+	"github.com/LinuxTerminali/aegisllm/internal/upstream"
 )
 
 func main() {
@@ -63,8 +63,8 @@ func main() {
 		serverErrCh <- srv.Start()
 	}()
 
-	log.Printf("[MAIN] LLM Workload Scheduler running. Proxy: %s -> Upstream: %s (Concurrency: %d, QueueSize: %d)",
-		srv.Addr(), cfg.UpstreamURL, cfg.MaxConcurrency, cfg.MaxQueueSize)
+	log.Printf("[MAIN] AegisLLM running. Proxy: %s -> Upstream: %s (Provider: %s, AuthKey: %s, Concurrency: %d, QueueSize: %d, Policy: %s)",
+		srv.Addr(), cfg.UpstreamURL, cfg.ProviderType, cfg.RedactedAPIKey(), cfg.MaxConcurrency, cfg.MaxQueueSize, cfg.SchedulingPolicy)
 
 	// Wait for OS termination signal or startup error
 	select {

@@ -147,3 +147,38 @@ func TestMockUpstream_TokenBucketRateLimit(t *testing.T) {
 		t.Fatalf("expected 429, got %d", resp3.StatusCode)
 	}
 }
+
+func TestMockUpstream_TPMRateLimit(t *testing.T) {
+	// TPM limit: 30 tokens burst
+	mock := NewMockUpstream(MockConfig{
+		RateLimitTPS:        1,
+		RateLimitTokenBurst: 30,
+	})
+	server := httptest.NewServer(mock)
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	// 1st request uses ~22 tokens -> fits within 30 tokens burst
+	resp1, err := client.Forward(context.Background(), "/v1/chat/completions", http.Header{}, []byte(`{}`))
+	if err != nil {
+		t.Fatalf("request 1 failed: %v", err)
+	}
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", resp1.StatusCode)
+	}
+
+	// 2nd immediate request requires ~22 tokens, but only ~8 remain -> 429
+	resp2, err := client.Forward(context.Background(), "/v1/chat/completions", http.Header{}, []byte(`{}`))
+	if err != nil {
+		t.Fatalf("request 2 failed: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 for token rate limit, got %d", resp2.StatusCode)
+	}
+}

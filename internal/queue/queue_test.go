@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/model-scheduler/model-scheduler/internal/model"
+	"github.com/LinuxTerminali/aegisllm/internal/model"
 )
 
 func TestPriorityQueue_OrderAndTieBreaker(t *testing.T) {
@@ -203,5 +203,27 @@ func TestPriorityQueue_ConcurrentAccess(t *testing.T) {
 
 	if totalDequeued != numProducers*itemsPerProducer {
 		t.Fatalf("expected %d total dequeued, got %d", numProducers*itemsPerProducer, totalDequeued)
+	}
+}
+
+func TestPriorityQueue_FairPolicy(t *testing.T) {
+	pq := NewPriorityQueueWithPolicy(20, PolicyFair)
+
+	_ = pq.Enqueue(NewItem("A-1", model.RequestMetadata{RunID: "run-A", Priority: model.PriorityProduction}, context.Background()))
+	_ = pq.Enqueue(NewItem("B-1", model.RequestMetadata{RunID: "run-B", Priority: model.PriorityProduction}, context.Background()))
+	_ = pq.Enqueue(NewItem("A-2", model.RequestMetadata{RunID: "run-A", Priority: model.PriorityProduction}, context.Background()))
+
+	// Fair queue should interleave runs: A-1, B-1, A-2
+	expected := []string{"A-1", "B-1", "A-2"}
+	for _, exp := range expected {
+		item := pq.Dequeue()
+		if item == nil || item.ID != exp {
+			t.Fatalf("expected %s, got %v", exp, item)
+		}
+	}
+
+	stats := pq.Stats()
+	if stats.TotalQueued != 0 {
+		t.Fatalf("expected 0 queued in stats, got %d", stats.TotalQueued)
 	}
 }

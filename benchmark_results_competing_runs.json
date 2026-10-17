@@ -1,0 +1,250 @@
+[
+  {
+    "mode": "A. Direct + Retries \u0026 Jitter",
+    "total_submitted": 100,
+    "successful": 44,
+    "success_rate_pct": 44,
+    "http_429_upstream": 56,
+    "http_429_scheduler": 0,
+    "http_503_queue_full": 0,
+    "http_503_upstream": 0,
+    "http_504_timeout": 0,
+    "canceled_count": 0,
+    "other_failures": 0,
+    "total_retries": 56,
+    "throughput_rps": 30.630840418020473,
+    "wall_clock_duration_ms": 1436.46075,
+    "p50_latency_ms": 28.164667,
+    "p95_latency_ms": 110.66325,
+    "p50_wait_ms": 0,
+    "p95_wait_ms": 0,
+    "jains_fairness_index": 0.7700875099443119,
+    "classes": {
+      "production": {
+        "total_requests": 100,
+        "completed": 44,
+        "failed": 56,
+        "success_rate_pct": 44,
+        "p50_latency_ms": 28.164667,
+        "p95_latency_ms": 110.66325,
+        "p50_wait_ms": 0,
+        "p95_wait_ms": 0
+      }
+    },
+    "runs": {
+      "run-prod-heavy": {
+        "total_requests": 66,
+        "completed": 26,
+        "failed": 40,
+        "success_rate_pct": 39.39393939393939,
+        "service_share_pct": 59.09090909090909,
+        "p50_latency_ms": 28.103917,
+        "p95_latency_ms": 110.66325
+      },
+      "run-prod-light-1": {
+        "total_requests": 15,
+        "completed": 9,
+        "failed": 6,
+        "success_rate_pct": 60,
+        "service_share_pct": 20.454545454545457,
+        "p50_latency_ms": 29.710125,
+        "p95_latency_ms": 97.88870800000001
+      },
+      "run-prod-light-2": {
+        "total_requests": 19,
+        "completed": 9,
+        "failed": 10,
+        "success_rate_pct": 47.368421052631575,
+        "service_share_pct": 20.454545454545457,
+        "p50_latency_ms": 29.305125,
+        "p95_latency_ms": 113.84049999999999
+      }
+    }
+  },
+  {
+    "mode": "B. Bounded FIFO Scheduler",
+    "total_submitted": 100,
+    "successful": 96,
+    "success_rate_pct": 96,
+    "http_429_upstream": 0,
+    "http_429_scheduler": 0,
+    "http_503_queue_full": 4,
+    "http_503_upstream": 0,
+    "http_504_timeout": 0,
+    "canceled_count": 0,
+    "other_failures": 0,
+    "total_retries": 0,
+    "throughput_rps": 69.18214009005028,
+    "wall_clock_duration_ms": 1387.6413750000002,
+    "p50_latency_ms": 580.923875,
+    "p95_latency_ms": 693.268333,
+    "p50_wait_ms": 523,
+    "p95_wait_ms": 627,
+    "jains_fairness_index": 0.6934537246049661,
+    "classes": {
+      "production": {
+        "total_requests": 100,
+        "completed": 96,
+        "failed": 4,
+        "success_rate_pct": 96,
+        "p50_latency_ms": 580.923875,
+        "p95_latency_ms": 693.268333,
+        "p50_wait_ms": 523,
+        "p95_wait_ms": 627
+      }
+    },
+    "runs": {
+      "run-prod-heavy": {
+        "total_requests": 66,
+        "completed": 62,
+        "failed": 4,
+        "success_rate_pct": 93.93939393939394,
+        "service_share_pct": 64.58333333333334,
+        "p50_latency_ms": 549.5018339999999,
+        "p95_latency_ms": 681.7664169999999
+      },
+      "run-prod-light-1": {
+        "total_requests": 15,
+        "completed": 15,
+        "failed": 0,
+        "success_rate_pct": 100,
+        "service_share_pct": 15.625,
+        "p50_latency_ms": 608.542542,
+        "p95_latency_ms": 711.185917
+      },
+      "run-prod-light-2": {
+        "total_requests": 19,
+        "completed": 19,
+        "failed": 0,
+        "success_rate_pct": 100,
+        "service_share_pct": 19.791666666666664,
+        "p50_latency_ms": 600.431791,
+        "p95_latency_ms": 681.898125
+      }
+    }
+  },
+  {
+    "mode": "C. Priority Scheduler",
+    "total_submitted": 100,
+    "successful": 96,
+    "success_rate_pct": 96,
+    "http_429_upstream": 0,
+    "http_429_scheduler": 0,
+    "http_503_queue_full": 4,
+    "http_503_upstream": 0,
+    "http_504_timeout": 0,
+    "canceled_count": 0,
+    "other_failures": 0,
+    "total_retries": 0,
+    "throughput_rps": 69.03968406433744,
+    "wall_clock_duration_ms": 1390.504625,
+    "p50_latency_ms": 580.2305829999999,
+    "p95_latency_ms": 690.324375,
+    "p50_wait_ms": 523,
+    "p95_wait_ms": 630,
+    "jains_fairness_index": 0.6934537246049661,
+    "classes": {
+      "production": {
+        "total_requests": 100,
+        "completed": 96,
+        "failed": 4,
+        "success_rate_pct": 96,
+        "p50_latency_ms": 580.2305829999999,
+        "p95_latency_ms": 690.324375,
+        "p50_wait_ms": 523,
+        "p95_wait_ms": 630
+      }
+    },
+    "runs": {
+      "run-prod-heavy": {
+        "total_requests": 66,
+        "completed": 62,
+        "failed": 4,
+        "success_rate_pct": 93.93939393939394,
+        "service_share_pct": 64.58333333333334,
+        "p50_latency_ms": 549.4734169999999,
+        "p95_latency_ms": 688.094625
+      },
+      "run-prod-light-1": {
+        "total_requests": 15,
+        "completed": 15,
+        "failed": 0,
+        "success_rate_pct": 100,
+        "service_share_pct": 15.625,
+        "p50_latency_ms": 607.905417,
+        "p95_latency_ms": 716.481125
+      },
+      "run-prod-light-2": {
+        "total_requests": 19,
+        "completed": 19,
+        "failed": 0,
+        "success_rate_pct": 100,
+        "service_share_pct": 19.791666666666664,
+        "p50_latency_ms": 594.0832499999999,
+        "p95_latency_ms": 678.21275
+      }
+    }
+  },
+  {
+    "mode": "D. Fair Scheduler (WDRR)",
+    "total_submitted": 100,
+    "successful": 93,
+    "success_rate_pct": 93,
+    "http_429_upstream": 0,
+    "http_429_scheduler": 0,
+    "http_503_queue_full": 1,
+    "http_503_upstream": 0,
+    "http_504_timeout": 6,
+    "canceled_count": 0,
+    "other_failures": 0,
+    "total_retries": 0,
+    "throughput_rps": 67.50056070647213,
+    "wall_clock_duration_ms": 1377.766333,
+    "p50_latency_ms": 519.7775409999999,
+    "p95_latency_ms": 744.993583,
+    "p50_wait_ms": 426,
+    "p95_wait_ms": 708,
+    "jains_fairness_index": 0.6948662328271873,
+    "classes": {
+      "production": {
+        "total_requests": 100,
+        "completed": 93,
+        "failed": 7,
+        "success_rate_pct": 93,
+        "p50_latency_ms": 519.7775409999999,
+        "p95_latency_ms": 744.993583,
+        "p50_wait_ms": 426,
+        "p95_wait_ms": 708
+      }
+    },
+    "runs": {
+      "run-prod-heavy": {
+        "total_requests": 66,
+        "completed": 60,
+        "failed": 6,
+        "success_rate_pct": 90.9090909090909,
+        "service_share_pct": 64.51612903225806,
+        "p50_latency_ms": 641.291917,
+        "p95_latency_ms": 761.5303749999999
+      },
+      "run-prod-light-1": {
+        "total_requests": 15,
+        "completed": 15,
+        "failed": 0,
+        "success_rate_pct": 100,
+        "service_share_pct": 16.129032258064516,
+        "p50_latency_ms": 123.909709,
+        "p95_latency_ms": 333.69241700000003
+      },
+      "run-prod-light-2": {
+        "total_requests": 19,
+        "completed": 18,
+        "failed": 1,
+        "success_rate_pct": 94.73684210526315,
+        "service_share_pct": 19.35483870967742,
+        "p50_latency_ms": 256.068875,
+        "p95_latency_ms": 387.019958
+      }
+    }
+  }
+]

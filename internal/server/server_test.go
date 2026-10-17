@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/model-scheduler/model-scheduler/internal/config"
-	"github.com/model-scheduler/model-scheduler/internal/model"
-	"github.com/model-scheduler/model-scheduler/internal/scheduler"
-	"github.com/model-scheduler/model-scheduler/internal/upstream"
+	"github.com/LinuxTerminali/aegisllm/internal/config"
+	"github.com/LinuxTerminali/aegisllm/internal/model"
+	"github.com/LinuxTerminali/aegisllm/internal/scheduler"
+	"github.com/LinuxTerminali/aegisllm/internal/upstream"
 )
 
 func TestServer_HealthzAndStatus(t *testing.T) {
@@ -305,4 +305,276 @@ func TestServer_QueueFullRejection(t *testing.T) {
 	if rejCount.Load() != 1 {
 		t.Fatalf("expected exactly 1 rejection, got %d", rejCount.Load())
 	}
+}
+
+func TestServer_RPMBurstPacing(t *testing.T) {
+	mockUpstream := upstream.NewMockUpstream(upstream.MockConfig{
+		BaseLatency: 5 * time.Millisecond,
+	})
+	mockServer := httptest.NewServer(mockUpstream)
+	defer mockServer.Close()
+
+	client, err := upstream.NewClient(upstream.ClientConfig{BaseURL: mockServer.URL})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	cfg := config.ServerConfig{
+		ListenAddr:        "127.0.0.1:0",
+		UpstreamURL:       mockServer.URL,
+		MaxConcurrency:    5,
+		MaxQueueSize:      10,
+		MaxQueueWait:      2 * time.Second,
+		RequestsPerMinute: 60, // 1 req/sec
+		RequestBurst:      2,  // 2 tokens burst
+		MaxPacingDelay:    50 * time.Millisecond,
+	}
+
+	srv, err := NewServer(cfg, client, nil)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	testServer := httptest.NewServer(srv.Handler())
+	defer testServer.Close()
+
+	sendReq := func() int {
+		body := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
+		resp, err := http.Post(testServer.URL+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("post failed: %v", err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// First 2 requests should consume burst tokens and succeed
+	if code := sendReq(); code != http.StatusOK {
+		t.Errorf("req 1 expected 200, got %d", code)
+	}
+	if code := sendReq(); code != http.StatusOK {
+		t.Errorf("req 2 expected 200, got %d", code)
+	}
+
+	// 3rd request needs ~1s refill, but MaxPacingDelay is 50ms, so it must be rejected with 429 Too Many Requests
+	if code := sendReq(); code != http.StatusTooManyRequests {
+		t.Errorf("req 3 expected 429 Too Many Requests, got %d", code)
+	}
+}
+
+func TestServer_TPMBurstPacing(t *testing.T) {
+	mockUpstream := upstream.NewMockUpstream(upstream.MockConfig{
+		BaseLatency: 5 * time.Millisecond,
+	})
+	mockServer := httptest.NewServer(mockUpstream)
+	defer mockServer.Close()
+
+	client, err := upstream.NewClient(upstream.ClientConfig{BaseURL: mockServer.URL})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	cfg := config.ServerConfig{
+		ListenAddr:      "127.0.0.1:0",
+		UpstreamURL:     mockServer.URL,
+		MaxConcurrency:  5,
+		MaxQueueSize:    10,
+		MaxQueueWait:    2 * time.Second,
+		TokensPerMinute: 6000, // 100 tokens/sec
+		TokenBurst:      100,  // 100 token burst
+		MaxPacingDelay:  50 * time.Millisecond,
+	}
+
+	srv, err := NewServer(cfg, client, nil)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	testServer := httptest.NewServer(srv.Handler())
+	defer testServer.Close()
+
+	// Body with ~800 chars -> estimated ~200 prompt tokens + completion -> >100 token burst
+	largePrompt := string(bytes.Repeat([]byte("test prompt word "), 50))
+	body := []byte(fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":"%s"}]}`, largePrompt))
+
+	resp, err := http.Post(testServer.URL+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// 1st request should consume all tokens or burst
+	// Now immediately send another
+	resp2, err := http.Post(testServer.URL+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusTooManyRequests && resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("expected at least one 429 under TPM exhaustion, got resp1=%d, resp2=%d", resp.StatusCode, resp2.StatusCode)
+	}
+}
+
+func TestServer_Upstream429WithRetryAfter_CoordinatedRetry(t *testing.T) {
+	var attempts atomic.Int32
+	retryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		att := attempts.Add(1)
+		if att == 1 {
+			// First attempt returns 429 with Retry-After: 0 (or 50ms)
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "0.02")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"Rate limit exceeded","type":"rate_limit_error"}}`))
+			return
+		}
+		// Second attempt succeeds
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-123","choices":[{"message":{"role":"assistant","content":"hello"}}],"usage":{"total_tokens":25}}`))
+	}))
+	defer retryServer.Close()
+
+	client, err := upstream.NewClient(upstream.ClientConfig{BaseURL: retryServer.URL})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	cfg := config.ServerConfig{
+		ListenAddr:     "127.0.0.1:0",
+		UpstreamURL:    retryServer.URL,
+		MaxConcurrency: 5,
+		MaxQueueSize:   10,
+		MaxQueueWait:   2 * time.Second,
+		MaxRetries:     3,
+		InitialBackoff: 20 * time.Millisecond,
+		MaxBackoff:     100 * time.Millisecond,
+	}
+
+	srv, err := NewServer(cfg, client, nil)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	testServer := httptest.NewServer(srv.Handler())
+	defer testServer.Close()
+
+	body := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"test"}]}`)
+	resp, err := http.Post(testServer.URL+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK after internal retry, got %d", resp.StatusCode)
+	}
+
+	if attempts.Load() != 2 {
+		t.Fatalf("expected 2 attempts (1 failure + 1 retry), got %d", attempts.Load())
+	}
+}
+
+func TestServer_ProviderUsageReconciliation(t *testing.T) {
+	mockUpstream := upstream.NewMockUpstream(upstream.MockConfig{
+		BaseLatency: 5 * time.Millisecond,
+	})
+	mockServer := httptest.NewServer(mockUpstream)
+	defer mockServer.Close()
+
+	client, err := upstream.NewClient(upstream.ClientConfig{BaseURL: mockServer.URL})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	cfg := config.ServerConfig{
+		ListenAddr:      "127.0.0.1:0",
+		UpstreamURL:     mockServer.URL,
+		MaxConcurrency:  5,
+		MaxQueueSize:    10,
+		MaxQueueWait:    2 * time.Second,
+		TokensPerMinute: 60000,
+		TokenBurst:      5000,
+	}
+
+	srv, err := NewServer(cfg, client, nil)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	testServer := httptest.NewServer(srv.Handler())
+	defer testServer.Close()
+
+	body := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"short"}]}`)
+	resp, err := http.Post(testServer.URL+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+	}
+
+	stats := srv.Scheduler().Stats()
+	if stats.Capacity.TotalTokensReconciled <= 0 {
+		t.Fatalf("expected TotalTokensReconciled > 0 after response, got %d", stats.Capacity.TotalTokensReconciled)
+	}
+}
+
+func TestServer_QueueTimeoutAndCancellation(t *testing.T) {
+	mockUpstream := upstream.NewMockUpstream(upstream.MockConfig{
+		BaseLatency: 80 * time.Millisecond,
+	})
+	mockServer := httptest.NewServer(mockUpstream)
+	defer mockServer.Close()
+
+	client, err := upstream.NewClient(upstream.ClientConfig{BaseURL: mockServer.URL})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	cfg := config.ServerConfig{
+		ListenAddr:     "127.0.0.1:0",
+		UpstreamURL:    mockServer.URL,
+		MaxConcurrency: 1,
+		MaxQueueSize:   5,
+		MaxQueueWait:   30 * time.Millisecond, // Queue wait timeout of 30ms
+	}
+
+	srv, err := NewServer(cfg, client, nil)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	testServer := httptest.NewServer(srv.Handler())
+	defer testServer.Close()
+
+	// Request 1 occupies the single slot for 80ms
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		body := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"occupier"}]}`)
+		resp, _ := http.Post(testServer.URL+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+	}()
+
+	time.Sleep(10 * time.Millisecond) // Let occupier acquire slot
+
+	// Request 2: Queued, should exceed MaxQueueWait (30ms) before occupier finishes (80ms)
+	body := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"queued"}]}`)
+	resp, err := http.Post(testServer.URL+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("expected 504 Gateway Timeout for exceeded queue wait, got %d", resp.StatusCode)
+	}
+
+	wg.Wait()
 }

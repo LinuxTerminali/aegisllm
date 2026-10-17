@@ -1,8 +1,10 @@
 package upstream
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"sync"
@@ -12,10 +14,13 @@ import (
 
 // MockConfig holds configuration for the mock upstream server.
 type MockConfig struct {
-	BaseLatency        time.Duration
-	MaxAllowedInFlight int     // Returns 429 if active concurrency exceeds this (0 = unlimited)
-	RateLimitRPS       float64 // Returns 429 if requests/sec exceed token bucket rate (0 = disabled)
-	RateLimitBurst     int     // Token bucket capacity (default equal to RateLimitRPS if unset)
+	BaseLatency         time.Duration
+	MaxAllowedInFlight  int     // Returns 429 if active concurrency exceeds this (0 = unlimited)
+	RateLimitRPS        float64 // Returns 429 if requests/sec exceed token bucket rate (0 = disabled)
+	RateLimitBurst      int     // Request token bucket capacity
+	RateLimitTPS        float64 // Returns 429 if tokens/sec exceed token bucket rate (0 = disabled)
+	RateLimitTokenBurst int     // Token rate bucket capacity
+	RetryAfterSeconds   int     // Value for Retry-After header on 429 (default 1)
 }
 
 // MockUpstream simulates an OpenAI-compatible upstream LLM provider.
@@ -26,29 +31,53 @@ type MockUpstream struct {
 	totalRequests   atomic.Int64
 	statusCodesSeen sync.Map
 
-	tbMu         sync.Mutex
-	tbTokens     float64
-	tbLastRefill time.Time
+	mu           sync.Mutex
+	reqTokens    float64
+	maxReqTokens float64
+	tokTokens    float64
+	maxTokTokens float64
+	lastRefill   time.Time
 }
 
 // NewMockUpstream creates a new MockUpstream instance.
 func NewMockUpstream(cfg MockConfig) *MockUpstream {
-	burst := cfg.RateLimitBurst
-	if burst <= 0 && cfg.RateLimitRPS > 0 {
-		burst = int(cfg.RateLimitRPS)
+	reqBurst := cfg.RateLimitBurst
+	if reqBurst <= 0 && cfg.RateLimitRPS > 0 {
+		reqBurst = int(cfg.RateLimitRPS)
+		if reqBurst < 1 {
+			reqBurst = 1
+		}
 	}
+
+	tokBurst := cfg.RateLimitTokenBurst
+	if tokBurst <= 0 && cfg.RateLimitTPS > 0 {
+		tokBurst = int(cfg.RateLimitTPS)
+		if tokBurst < 100 {
+			tokBurst = 100
+		}
+	}
+
+	retryAfter := cfg.RetryAfterSeconds
+	if retryAfter <= 0 {
+		cfg.RetryAfterSeconds = 1
+	}
+
 	return &MockUpstream{
 		config:       cfg,
-		tbTokens:     float64(burst),
-		tbLastRefill: time.Now(),
+		reqTokens:    float64(reqBurst),
+		maxReqTokens: float64(reqBurst),
+		tokTokens:    float64(tokBurst),
+		maxTokTokens: float64(tokBurst),
+		lastRefill:   time.Now(),
 	}
 }
 
 // ChatCompletionRequest is a subset of the OpenAI chat completion payload.
 type ChatCompletionRequest struct {
-	Model    string `json:"model"`
-	Messages []any  `json:"messages"`
-	Stream   bool   `json:"stream"`
+	Model     string `json:"model"`
+	Messages  []any  `json:"messages"`
+	Stream    bool   `json:"stream"`
+	MaxTokens *int   `json:"max_tokens"`
 }
 
 // ChatCompletionChoice represents a single choice in the completion response.
@@ -106,10 +135,43 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read body to compute tokens and model
+	bodyBytes, _ := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
+	var chatReq ChatCompletionRequest
+	_ = json.Unmarshal(bodyBytes, &chatReq)
+	modelName := chatReq.Model
+	if modelName == "" {
+		modelName = "gpt-4o-mock"
+	}
+
+	// Token usage calculation
+	promptTokens := len(bodyBytes) / 4
+	if promptTokens < 5 {
+		promptTokens = 10
+	}
+	completionTokens := 12
+	if chatReq.MaxTokens != nil && *chatReq.MaxTokens > 0 {
+		completionTokens = *chatReq.MaxTokens
+		if completionTokens > 50 {
+			completionTokens = 50
+		}
+	}
+	totalTokens := promptTokens + completionTokens
+
+	retryAfterStr := strconv.Itoa(m.config.RetryAfterSeconds)
+	if retryAfterStr == "0" {
+		retryAfterStr = "1"
+	}
+
 	// 1. Check for caller-injected status code override
 	if overrideCodeStr := r.Header.Get("X-Mock-Status"); overrideCodeStr != "" {
 		if code, err := strconv.Atoi(overrideCodeStr); err == nil && code >= 100 && code < 600 {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			if code == http.StatusTooManyRequests {
+				w.Header().Set("Retry-After", retryAfterStr)
+			}
 			w.WriteHeader(code)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"error": map[string]any{
@@ -122,46 +184,61 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 2. Check for token bucket rate limit
-	if m.config.RateLimitRPS > 0 {
-		m.tbMu.Lock()
-		now := time.Now()
-		elapsed := now.Sub(m.tbLastRefill).Seconds()
-		m.tbTokens += elapsed * m.config.RateLimitRPS
-		burst := float64(m.config.RateLimitBurst)
-		if burst <= 0 {
-			burst = m.config.RateLimitRPS
-		}
-		if m.tbTokens > burst {
-			m.tbTokens = burst
-		}
-		m.tbLastRefill = now
+	// 2. Refill and check token bucket rate limits (RPM and TPM)
+	m.mu.Lock()
+	m.refill(time.Now())
 
-		if m.tbTokens < 1.0 {
-			m.tbMu.Unlock()
+	// Check TPM limit
+	if m.config.RateLimitTPS > 0 {
+		neededTokens := float64(totalTokens)
+		if m.tokTokens < neededTokens {
+			m.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.Header().Set("Retry-After", "1")
-			w.Header().Set("x-ratelimit-remaining-requests", "0")
+			w.Header().Set("Retry-After", retryAfterStr)
+			w.Header().Set("x-ratelimit-remaining-tokens", "0")
+			w.Header().Set("x-ratelimit-reset-tokens", "1s")
 			w.WriteHeader(http.StatusTooManyRequests)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"error": map[string]any{
-					"message": "Mock upstream request rate limit reached (token bucket exhausted)",
+					"message": "Mock upstream token rate limit exceeded (TPM bucket exhausted)",
 					"type":    "rate_limit_error",
 					"code":    429,
 				},
 			})
 			return
 		}
-		m.tbTokens -= 1.0
-		rem := int(m.tbTokens)
-		m.tbMu.Unlock()
-		w.Header().Set("x-ratelimit-remaining-requests", strconv.Itoa(rem))
+		m.tokTokens -= neededTokens
 	}
+
+	// Check RPM limit
+	if m.config.RateLimitRPS > 0 {
+		if m.reqTokens < 1.0 {
+			m.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("Retry-After", retryAfterStr)
+			w.Header().Set("x-ratelimit-remaining-requests", "0")
+			w.Header().Set("x-ratelimit-reset-requests", "1s")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"message": "Mock upstream request rate limit reached (RPM bucket exhausted)",
+					"type":    "rate_limit_error",
+					"code":    429,
+				},
+			})
+			return
+		}
+		m.reqTokens -= 1.0
+	}
+
+	remReq := int(m.reqTokens)
+	remTok := int(m.tokTokens)
+	m.mu.Unlock()
 
 	// 3. Check for concurrency overload in mock
 	if m.config.MaxAllowedInFlight > 0 && current > int64(m.config.MaxAllowedInFlight) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Retry-After", "1")
+		w.Header().Set("Retry-After", retryAfterStr)
 		w.WriteHeader(http.StatusTooManyRequests)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error": map[string]any{
@@ -190,15 +267,7 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Parse model name from body if present
-	var chatReq ChatCompletionRequest
-	_ = json.NewDecoder(r.Body).Decode(&chatReq)
-	modelName := chatReq.Model
-	if modelName == "" {
-		modelName = "gpt-4o-mock"
-	}
-
-	// 5. Return valid OpenAI chat completion response
+	// 5. Return valid OpenAI chat completion response with rate limit headers
 	resp := ChatCompletionResponse{
 		ID:      fmt.Sprintf("chatcmpl-mock-%d", reqNum),
 		Object:  "chat.completion",
@@ -218,15 +287,46 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 		Usage: ChatCompletionUsage{
-			PromptTokens:     10,
-			CompletionTokens: 12,
-			TotalTokens:      22,
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      totalTokens,
 		},
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if m.config.RateLimitRPS > 0 {
+		w.Header().Set("x-ratelimit-remaining-requests", strconv.Itoa(remReq))
+		w.Header().Set("x-ratelimit-reset-requests", "1s")
+	}
+	if m.config.RateLimitTPS > 0 {
+		w.Header().Set("x-ratelimit-remaining-tokens", strconv.Itoa(remTok))
+		w.Header().Set("x-ratelimit-reset-tokens", "1s")
+	}
+
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (m *MockUpstream) refill(now time.Time) {
+	elapsed := now.Sub(m.lastRefill).Seconds()
+	if elapsed <= 0 {
+		return
+	}
+	m.lastRefill = now
+
+	if m.config.RateLimitRPS > 0 {
+		m.reqTokens += elapsed * m.config.RateLimitRPS
+		if m.reqTokens > m.maxReqTokens {
+			m.reqTokens = m.maxReqTokens
+		}
+	}
+
+	if m.config.RateLimitTPS > 0 {
+		m.tokTokens += elapsed * m.config.RateLimitTPS
+		if m.tokTokens > m.maxTokTokens {
+			m.tokTokens = m.maxTokTokens
+		}
+	}
 }
 
 // Stats returns the current execution statistics of the mock upstream.
@@ -239,12 +339,9 @@ func (m *MockUpstream) ResetStats() {
 	m.activeInFlight.Store(0)
 	m.peakInFlight.Store(0)
 	m.totalRequests.Store(0)
-	m.tbMu.Lock()
-	burst := m.config.RateLimitBurst
-	if burst <= 0 && m.config.RateLimitRPS > 0 {
-		burst = int(m.config.RateLimitRPS)
-	}
-	m.tbTokens = float64(burst)
-	m.tbLastRefill = time.Now()
-	m.tbMu.Unlock()
+	m.mu.Lock()
+	m.reqTokens = m.maxReqTokens
+	m.tokTokens = m.maxTokTokens
+	m.lastRefill = time.Now()
+	m.mu.Unlock()
 }

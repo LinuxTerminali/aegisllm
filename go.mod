@@ -1,3 +1,3 @@
-module github.com/model-scheduler/model-scheduler
+module github.com/LinuxTerminali/aegisllm
 
-go 1.27.2
+go 1.23

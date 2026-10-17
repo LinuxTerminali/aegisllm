@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/model-scheduler/model-scheduler/internal/upstream"
+	"github.com/LinuxTerminali/aegisllm/internal/upstream"
 )
 
 func main() {
