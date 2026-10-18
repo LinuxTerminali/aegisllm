@@ -223,3 +223,53 @@ func TestServer_Upstream429DrainsSharedBucket(t *testing.T) {
 		t.Fatalf("expected the shared bucket to hold requests for Retry-After (~1s), total elapsed %v", el)
 	}
 }
+
+// -rpm 30 with no burst must allow 30 requests at once, as the provider does. A 10% rule
+// in config once reduced this to 3 (seen live against Groq: 3 immediate, then 1 per 2s).
+func TestServer_ConfiguredRPMUsesFullWindowBurst(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[],"usage":{"total_tokens":3}}`))
+	}))
+	defer up.Close()
+	client, _ := upstream.NewClient(upstream.ClientConfig{BaseURL: up.URL})
+	cfg := config.ServerConfig{
+		ListenAddr: "127.0.0.1:0", UpstreamURL: up.URL,
+		MaxConcurrency: 32, MaxQueueSize: 100, MaxQueueWait: 5 * time.Second,
+		RequestsPerMinute: 30, AutoLearnLimits: false,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(cfg, client, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	if got := srv.Scheduler().Stats().Capacity.MaxRequestCapacity; got != 30 {
+		t.Fatalf("expected burst = full window (30), got %v", got)
+	}
+
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	start := time.Now()
+	var wg sync.WaitGroup
+	for i := 0; i < 30; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := http.Post(ts.URL+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+			if err == nil {
+				resp.Body.Close()
+			}
+		}()
+	}
+	wg.Wait()
+	if el := time.Since(start); el > 1500*time.Millisecond {
+		t.Fatalf("30 requests within the window should not be paced; took %v", el)
+	}
+	if st := srv.Scheduler().Stats(); st.Capacity.TotalPacedRequests != 0 {
+		t.Fatalf("expected no pacing inside the burst, got %d paced", st.Capacity.TotalPacedRequests)
+	}
+}

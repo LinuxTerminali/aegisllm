@@ -117,20 +117,10 @@ func (c *ServerConfig) Validate() error {
 		return fmt.Errorf("tpm must be >= 0, got %f", c.TokensPerMinute)
 	}
 
-	if c.RequestsPerMinute > 0 && c.RequestBurst <= 0 {
-		// Auto-default burst to 10% of RPM or 1
-		c.RequestBurst = int(c.RequestsPerMinute / 10)
-		if c.RequestBurst < 1 {
-			c.RequestBurst = 1
-		}
-	}
-	if c.TokensPerMinute > 0 && c.TokenBurst <= 0 {
-		// Auto-default burst to 10% of TPM or 100
-		c.TokenBurst = int(c.TokensPerMinute / 10)
-		if c.TokenBurst < 100 {
-			c.TokenBurst = 100
-		}
-	}
+	// Burst is left at 0 here: the capacity tracker defaults it to the full per-minute
+	// window, which is how providers enforce "N per minute". A 10% rule here used to
+	// override that and trickle requests from the first one (observed against Groq:
+	// 3 immediate, then one every 2s, with -rpm 30).
 
 	if c.MaxRetries < 0 {
 		return fmt.Errorf("max-retries must be >= 0, got %d", c.MaxRetries)
