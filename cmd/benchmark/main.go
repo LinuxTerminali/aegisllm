@@ -160,8 +160,21 @@ func main() {
 	realProvider := flag.String("provider-type", "openai", "Provider adapter for the real upstream: openai, anthropic, generic")
 	realModel := flag.String("model", "", "Model to request from the real provider (e.g. gpt-4o-mini, claude-3-5-haiku-latest, gemini-2.5-flash)")
 	verboseFlag := flag.Bool("verbose", false, "Keep the proxy's per-request logs and print a per-request timeline for every mode")
+	modesFlag := flag.String("modes", "A,B,C,D", "Which modes to run, e.g. A,C. Skipped modes show as zeros in the table")
+	cooldown := flag.Duration("cooldown", -1, "Pause between modes so a real provider's window refills (default 65s with -upstream-url, 0 for the mock)")
 	flag.Parse()
 	verbose = *verboseFlag
+
+	if *cooldown < 0 {
+		*cooldown = 0
+		if *realURL != "" {
+			*cooldown = 65 * time.Second
+		}
+	}
+	wantMode := map[string]bool{}
+	for _, m := range strings.Split(strings.ToUpper(*modesFlag), ",") {
+		wantMode[strings.TrimSpace(m)] = true
+	}
 
 	if *realURL != "" {
 		if *realModel == "" {
@@ -218,23 +231,43 @@ func main() {
 	schedKnowsLimits := !*autoLearn
 
 	// Mode A: Direct requests with independent retries and jitter
-	fmt.Printf("mode A: direct calls with retries and jitter\n")
-	reportA := runModeA(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst)
+	type modeDef struct {
+		key, title, label string
+		run               func() BenchmarkReport
+	}
+	modes := []modeDef{
+		{"A", "mode A: direct calls with retries and jitter", "A. Direct + Retries & Jitter", func() BenchmarkReport {
+			return runModeA(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst)
+		}},
+		{"B", "mode B: FIFO scheduler", "B. Bounded FIFO Scheduler", func() BenchmarkReport {
+			return runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyFIFO, "B. Bounded FIFO Scheduler", schedKnowsLimits)
+		}},
+		{"C", "mode C: priority scheduler", "C. Priority Scheduler", func() BenchmarkReport {
+			return runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyPriority, "C. Priority Scheduler", schedKnowsLimits)
+		}},
+		{"D", "mode D: fair scheduler (per-run WDRR)", "D. Fair Scheduler (WDRR)", func() BenchmarkReport {
+			return runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyFair, "D. Fair Scheduler (WDRR)", schedKnowsLimits)
+		}},
+	}
 
-	// Mode B: Scheduler with FIFO Ordering
-	fmt.Printf("mode B: FIFO scheduler\n")
-	reportB := runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyFIFO, "B. Bounded FIFO Scheduler", schedKnowsLimits)
+	var reports []BenchmarkReport
+	ran := 0
+	for _, m := range modes {
+		if !wantMode[m.key] {
+			reports = append(reports, BenchmarkReport{Mode: m.label + " (skipped)", Classes: map[string]ClassStats{}, Runs: map[string]RunStats{}, StatusCounts: map[int]int{}})
+			continue
+		}
+		if ran > 0 && *cooldown > 0 {
+			// Every mode must start from a full provider window, or it inherits the
+			// previous mode's exhaustion and the comparison is meaningless.
+			fmt.Printf("cooling down %s so the provider's window refills\n", cooldown.Round(time.Second))
+			time.Sleep(*cooldown)
+		}
+		fmt.Printf("%s\n", m.title)
+		reports = append(reports, m.run())
+		ran++
+	}
 
-	// Mode C: Scheduler with Priority Ordering
-	fmt.Printf("mode C: priority scheduler\n")
-	reportC := runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyPriority, "C. Priority Scheduler", schedKnowsLimits)
-
-	// Mode D: Fair Scheduler (Per-Run WDRR)
-	fmt.Printf("mode D: fair scheduler (per-run WDRR)\n")
-	reportD := runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyFair, "D. Fair Scheduler (WDRR)", schedKnowsLimits)
-
-	// Print Comparison Summary
-	reports := []BenchmarkReport{reportA, reportB, reportC, reportD}
 	printComparisonTable(reports)
 	printFailureBreakdown(reports)
 

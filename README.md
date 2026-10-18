@@ -107,7 +107,7 @@ go run ./cmd/benchmark -scenario rpm      # rate-limit scenario
 go run ./cmd/benchmark -scenario competing-runs
 ```
 
-Against a real provider (all four modes hit it, so keep `-requests` small on free tiers):
+Against a real provider. Modes run one after another on the same account, so the harness pauses 65s between them (`-cooldown`) to let the provider's minute window refill; without that, each mode inherits the previous one's exhaustion. Use `-modes A,C` to compare just the baseline and the priority scheduler, and `-verbose` for a per-request timeline:
 
 ```bash
 # Gemini free tier, OpenAI-compatible endpoint
