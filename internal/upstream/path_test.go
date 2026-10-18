@@ -13,8 +13,12 @@ func TestJoinUpstreamPath(t *testing.T) {
 		{"", "/v1/chat/completions", "/v1/chat/completions"},
 		{"/", "/v1/messages", "/v1/messages"},
 		{"/openai/deployments/gpt4o/chat/completions", "/v1/chat/completions", "/openai/deployments/gpt4o/chat/completions"},
-		{"/api", "/v1/chat/completions", "/api/v1/chat/completions"},
 		{"/v1/", "/v1/messages", "/v1/messages"},
+		{"/v1beta/openai", "/v1/chat/completions", "/v1beta/openai/chat/completions"},
+		{"/openai/v1", "/v1/chat/completions", "/openai/v1/chat/completions"},
+		{"/api/v1", "/v1/embeddings", "/api/v1/embeddings"},
+		{"", "/v1/messages/count_tokens", "/v1/messages/count_tokens"},
+		{"/v1", "/v1/messages/count_tokens", "/v1/messages/count_tokens"},
 	}
 	for _, c := range cases {
 		if got := JoinUpstreamPath(c.base, c.in); got != c.want {

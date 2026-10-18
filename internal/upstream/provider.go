@@ -71,10 +71,21 @@ var endpointSuffixes = []string{"/chat/completions", "/messages", "/completions"
 
 // JoinUpstreamPath resolves the upstream path for an incoming request path.
 //
-//   - base "https://api.openai.com/v1"  + "/v1/chat/completions" -> "/v1/chat/completions" (no /v1/v1)
-//   - base "https://host/openai/deployments/d/chat/completions?api-version=x" + anything -> unchanged
-//   - base "http://localhost:11434"     + "/v1/chat/completions" -> "/v1/chat/completions"
-//   - base "https://api.anthropic.com"  + "/v1/messages"         -> "/v1/messages"
+// Rules, in order:
+//
+//   - base already ends with an endpoint (Azure deployment URLs): use base as-is
+//
+//   - base has a path (it carries the provider's API version: /v1, /v1beta/openai,
+//     /openai/v1, /api/v1): drop the incoming "/v1" and append the rest
+//
+//   - base is a bare host: append the incoming path unchanged
+//
+//     https://api.openai.com                      + /v1/chat/completions -> /v1/chat/completions
+//     https://api.openai.com/v1                   + /v1/chat/completions -> /v1/chat/completions
+//     https://generativelanguage.googleapis.com/v1beta/openai + /v1/chat/completions -> /v1beta/openai/chat/completions
+//     https://api.groq.com/openai/v1              + /v1/chat/completions -> /openai/v1/chat/completions
+//     http://localhost:11434                      + /v1/chat/completions -> /v1/chat/completions
+//     https://api.anthropic.com                   + /v1/messages         -> /v1/messages
 func JoinUpstreamPath(basePath, incoming string) string {
 	basePath = strings.TrimRight(basePath, "/")
 	if !strings.HasPrefix(incoming, "/") {
@@ -85,11 +96,9 @@ func JoinUpstreamPath(basePath, incoming string) string {
 			return basePath
 		}
 	}
-	// Drop a duplicated leading segment (typically "/v1") already present at the end of base.
-	if i := strings.Index(incoming[1:], "/"); i > 0 {
-		first := incoming[:i+1] // e.g. "/v1"
-		if strings.HasSuffix(basePath, first) {
-			return basePath + incoming[i+1:]
+	if basePath != "" {
+		if rest, ok := strings.CutPrefix(incoming, "/v1/"); ok {
+			return basePath + "/" + rest
 		}
 	}
 	return basePath + incoming
