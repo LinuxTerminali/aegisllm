@@ -48,14 +48,37 @@ Streams are relayed event by event. A stream that has started is never re-issued
 
 ## Results
 
-Rate-limit benchmark: 100 requests, provider limited to 15 requests/second with burst 5, scheduler **not** told the limit.
+### Against a real provider
+
+Groq, free tier, `openai/gpt-oss-120b`, limit 30 requests per minute. 100 requests sent at once; the same workload run directly and then through the scheduler, with a 65 s pause between so the provider's window was full for both.
+
+| | Direct calls with retries | Through AegisLLM |
+|---|---|---|
+| Completed | 35 / 100 | 100 / 100 |
+| Failed after retries | 65 | 0 |
+| Retries | 205, performed by the clients | 30, performed by the proxy; clients saw none |
+| Wall clock | 7.6 s, then gave up | 201 s, everything finished |
+| `production` (49 requests) | 16 completed, p50 1.0 s | 49 completed, p50 16.6 s |
+| `interactive` (24) | 11 completed | 24 completed, p50 96 s |
+| `background` (15) | 5 completed | 15 completed, p50 146 s |
+| `batch` (12) | 3 completed | 12 completed, p50 182 s |
+
+At 30 per minute, 100 requests take at least 140 s after the first 30. The scheduler used that time to finish all of them in priority order. Direct calls spent 205 retries failing within 8 s because the retry budget ran out long before the window refilled.
+
+Same setup with 40 requests, a small overflow: both finished 40/40. Direct took 7.7 s with 10 client-side retries; the scheduler took 31 s with none, and delivered all 25 `production` requests before any other class. For small overflows the scheduler's value is ordering and the absence of retry logic in every client; for large or sustained ones it is completion.
+
+Reproduce: see [Development](#development) for the exact command. Groq reports its real per-minute limit only in 429 text, so `-rpm` is set by hand there; OpenAI and Anthropic limits are learned from headers.
+
+### Against the embedded mock (reproducible offline)
+
+100 requests, mock provider limited to 15 requests/second with burst 5, scheduler **not** told the limit, clients waiting up to 20 s.
 
 | Mode | Success | Upstream 429s | Retries | Wall clock |
 |---|---|---|---|---|
-| Direct calls with retries and jitter | 57% | 43 | 213 | 3.8s |
-| Through AegisLLM | 100% | 0 | 1 | 7.3s |
+| Direct calls with retries and jitter | 57% | 43 | 213 | 3.8 s |
+| Through AegisLLM | 100% | 0 | 1 | 7.3 s |
 
-The theoretical minimum for this workload is 6.3s. With priority scheduling, `production` requests finish at p50 ≈ 2.1s while `batch` waits (p50 ≈ 6.6s). These numbers come from the embedded mock provider; reproduce with `go run ./cmd/benchmark -scenario rpm`.
+`go run ./cmd/benchmark -scenario rpm` reproduces this.
 
 ## Why not LiteLLM?
 
@@ -110,10 +133,10 @@ go run ./cmd/benchmark -scenario competing-runs
 Against a real provider. Modes run one after another on the same account, so the harness pauses 65s between them (`-cooldown`) to let the provider's minute window refill; without that, each mode inherits the previous one's exhaustion. Use `-modes A,C` to compare just the baseline and the priority scheduler, and `-verbose` for a per-request timeline:
 
 ```bash
-# Gemini free tier, OpenAI-compatible endpoint
-BENCH_API_KEY=$GEMINI_API_KEY go run ./cmd/benchmark -scenario rpm -requests 25 -burst 10 \
-  -provider-type generic -upstream-url https://generativelanguage.googleapis.com/v1beta/openai -model gemini-2.5-flash \
-  -auto-learn=false -rate-limit-rps 0.25      # = 15 RPM; set to your tier's limit if the provider sends no limit headers
+# Groq free tier (the run in Results): 30 RPM / 8000 TPM set by hand, baseline and priority modes only
+BENCH_API_KEY=$GROQ_API_KEY go run ./cmd/benchmark -scenario rpm -requests 100 -burst 100 -upstream-concurrency 16 \
+  -provider-type generic -upstream-url https://api.groq.com/openai/v1 -model openai/gpt-oss-120b \
+  -auto-learn=false -rate-limit-rps 0.5 -rate-limit-tps 133 -client-timeout 240s -modes A,C
 
 # OpenAI / Anthropic: limits are learned from headers
 BENCH_API_KEY=$OPENAI_API_KEY    go run ./cmd/benchmark -scenario rpm -requests 50 -provider-type openai    -upstream-url https://api.openai.com    -model gpt-4o-mini
