@@ -26,6 +26,29 @@ import (
 	"github.com/LinuxTerminali/aegisllm/internal/upstream"
 )
 
+// realTarget, when set, makes every mode call a real provider instead of the embedded mock.
+type realTarget struct {
+	URL          string
+	APIKey       string
+	ProviderType string
+	Model        string
+}
+
+var real *realTarget
+
+// endpointPath is the request path for the provider shape in use.
+func (t *realTarget) endpointPath() string {
+	if t.ProviderType == "anthropic" {
+		return "/v1/messages"
+	}
+	return "/v1/chat/completions"
+}
+
+// requestBody builds the smallest valid request for the provider shape in use.
+func (t *realTarget) requestBody(content string) string {
+	return fmt.Sprintf(`{"model":%q,"max_tokens":5,"messages":[{"role":"user","content":%q}]}`, t.Model, content)
+}
+
 // WorkloadRequest defines a deterministic request in the test workload.
 type WorkloadRequest struct {
 	Index         int           `json:"index"`
@@ -120,7 +143,28 @@ func main() {
 	jsonOut := flag.String("json-out", "", "Path to write JSON benchmark report")
 	clientTimeout := flag.Duration("client-timeout", 0, "Override per-request client deadline for every run (0 = scenario default)")
 	autoLearn := flag.Bool("auto-learn", true, "Scheduler modes learn RPM/TPM from upstream headers instead of being configured with the limit")
+	realURL := flag.String("upstream-url", "", "Run against a real provider at this base URL instead of the embedded mock (e.g. https://api.openai.com, https://api.anthropic.com, https://generativelanguage.googleapis.com/v1beta/openai)")
+	realKey := flag.String("upstream-api-key", os.Getenv("BENCH_API_KEY"), "API key for the real provider (or BENCH_API_KEY)")
+	realProvider := flag.String("provider-type", "openai", "Provider adapter for the real upstream: openai, anthropic, generic")
+	realModel := flag.String("model", "", "Model to request from the real provider (e.g. gpt-4o-mini, claude-3-5-haiku-latest, gemini-2.5-flash)")
 	flag.Parse()
+
+	if *realURL != "" {
+		if *realModel == "" {
+			fmt.Fprintln(os.Stderr, "-model is required with -upstream-url")
+			os.Exit(2)
+		}
+		real = &realTarget{URL: *realURL, APIKey: *realKey, ProviderType: strings.ToLower(*realProvider), Model: *realModel}
+		if *clientTimeout == 0 {
+			*clientTimeout = 60 * time.Second
+		}
+		if *rateLimitRPS == 0 && !*autoLearn {
+			fmt.Fprintln(os.Stderr, "with -auto-learn=false against a real provider, pass -rate-limit-rps (and -rate-limit-tps) so the scheduler knows the limit")
+			os.Exit(2)
+		}
+		fmt.Fprintf(os.Stderr, "real provider: %s (%s, model %s). Four modes x %d requests = %d provider calls; keep -requests small on free tiers.\n",
+			*realURL, real.ProviderType, real.Model, *requestsCount, 4**requestsCount)
+	}
 	log.SetOutput(io.Discard) // the proxy logs every request; keep benchmark output readable
 
 	// Apply scenario defaults if not explicitly overridden
@@ -295,6 +339,15 @@ func runModeA(workload []WorkloadRequest, upstreamConcurrency int, rateLimitRPS 
 	server := httptest.NewServer(mock)
 	defer server.Close()
 
+	var direct *upstream.Client
+	if real != nil {
+		var err error
+		direct, err = upstream.NewClient(upstream.ClientConfig{BaseURL: real.URL, APIKey: real.APIKey, ProviderType: real.ProviderType, Timeout: 60 * time.Second})
+		if err != nil {
+			panic(err)
+		}
+	}
+
 	results := make([]RequestResult, len(workload))
 	var wg sync.WaitGroup
 
@@ -358,16 +411,22 @@ func runModeA(workload []WorkloadRequest, upstreamConcurrency int, rateLimitRPS 
 					}
 				}
 
-				body := fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":"%s"}]}`, r.RequestID)
-				httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/chat/completions", bytes.NewBufferString(body))
-				if err != nil {
-					lastErr = err
-					break
+				var resp *http.Response
+				var err error
+				if real != nil {
+					resp, err = direct.Forward(ctx, real.endpointPath(), http.Header{}, []byte(real.requestBody(r.RequestID)))
+				} else {
+					body := fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":"%s"}]}`, r.RequestID)
+					var httpReq *http.Request
+					httpReq, err = http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/chat/completions", bytes.NewBufferString(body))
+					if err != nil {
+						lastErr = err
+						break
+					}
+					httpReq.Header.Set("Content-Type", "application/json")
+					httpReq.Header.Set("X-Mock-Delay", r.Duration.String())
+					resp, err = http.DefaultClient.Do(httpReq)
 				}
-				httpReq.Header.Set("Content-Type", "application/json")
-				httpReq.Header.Set("X-Mock-Delay", r.Duration.String())
-
-				resp, err := http.DefaultClient.Do(httpReq)
 				if err != nil {
 					lastErr = err
 					break
@@ -436,9 +495,19 @@ func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateL
 		}
 	}
 
+	upstreamURL := mockServer.URL
+	providerType := ""
+	apiKey := ""
+	if real != nil {
+		upstreamURL, providerType, apiKey = real.URL, real.ProviderType, real.APIKey
+	}
+
 	cfg := config.ServerConfig{
 		ListenAddr:        "127.0.0.1:0",
-		UpstreamURL:       mockServer.URL,
+		UpstreamURL:       upstreamURL,
+		ProviderType:      providerType,
+		UpstreamAPIKey:    apiKey,
+		UpstreamTimeout:   60 * time.Second,
 		MaxConcurrency:    upstreamConcurrency,
 		MaxQueueSize:      len(workload),
 		MaxQueueWait:      maxClientTimeout,
@@ -460,7 +529,7 @@ func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateL
 		cfg.TokenBurst = rateLimitTokenBurst
 	}
 
-	client, err := upstream.NewClient(upstream.ClientConfig{BaseURL: mockServer.URL})
+	client, err := upstream.NewClient(upstream.ClientConfig{BaseURL: upstreamURL, ProviderType: providerType, APIKey: apiKey, Timeout: 60 * time.Second})
 	if err != nil {
 		panic(err)
 	}
@@ -492,7 +561,11 @@ func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateL
 			defer cancel()
 
 			body := fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":"%s"}]}`, r.RequestID)
-			httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, proxyServer.URL+"/v1/chat/completions", bytes.NewBufferString(body))
+			path := "/v1/chat/completions"
+			if real != nil {
+				body, path = real.requestBody(r.RequestID), real.endpointPath()
+			}
+			httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, proxyServer.URL+path, bytes.NewBufferString(body))
 			if err != nil {
 				return
 			}
@@ -500,7 +573,9 @@ func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateL
 			httpReq.Header.Set("X-Run-ID", r.RunID)
 			httpReq.Header.Set("X-Workload-Class", r.WorkloadClass)
 			httpReq.Header.Set("X-Priority", strconv.Itoa(r.Priority))
-			httpReq.Header.Set("X-Mock-Delay", r.Duration.String())
+			if real == nil {
+				httpReq.Header.Set("X-Mock-Delay", r.Duration.String())
+			}
 
 			resp, err := http.DefaultClient.Do(httpReq)
 			dur := time.Since(reqStart)

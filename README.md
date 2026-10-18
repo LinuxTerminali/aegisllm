@@ -107,6 +107,19 @@ go run ./cmd/benchmark -scenario rpm      # rate-limit scenario
 go run ./cmd/benchmark -scenario competing-runs
 ```
 
+Against a real provider (all four modes hit it, so keep `-requests` small on free tiers):
+
+```bash
+# Gemini free tier, OpenAI-compatible endpoint
+BENCH_API_KEY=$GEMINI_API_KEY go run ./cmd/benchmark -scenario rpm -requests 25 -burst 10 \
+  -provider-type generic -upstream-url https://generativelanguage.googleapis.com/v1beta/openai -model gemini-2.5-flash \
+  -auto-learn=false -rate-limit-rps 0.25      # = 15 RPM; set to your tier's limit if the provider sends no limit headers
+
+# OpenAI / Anthropic: limits are learned from headers
+BENCH_API_KEY=$OPENAI_API_KEY    go run ./cmd/benchmark -scenario rpm -requests 50 -provider-type openai    -upstream-url https://api.openai.com    -model gpt-4o-mini
+BENCH_API_KEY=$ANTHROPIC_API_KEY go run ./cmd/benchmark -scenario rpm -requests 50 -provider-type anthropic -upstream-url https://api.anthropic.com -model claude-3-5-haiku-latest
+```
+
 Provider smoke test against a real key: `OPENAI_API_KEY=sk-... go test -run TestRealProvider_Smoke ./internal/upstream`.
 
 Apache 2.0. Contributions: see [CONTRIBUTING.md](CONTRIBUTING.md).
