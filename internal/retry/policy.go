@@ -16,7 +16,7 @@ type Policy struct {
 	JitterFraction float64       `json:"jitter_fraction"` // e.g. 0.25 represents +-25%
 }
 
-// DefaultPolicy returns safe, production-grade retry defaults.
+// DefaultPolicy returns safe, retry defaults.
 func DefaultPolicy() Policy {
 	return Policy{
 		MaxRetries:     3,

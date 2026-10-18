@@ -208,7 +208,7 @@ func (t *DualTokenBucketTracker) Reserve(ctx context.Context, id string, estimat
 		}
 	}
 
-	// 1. Check deadline feasibility: request cannot plausibly be admitted before client deadline
+	// Check deadline feasibility: request cannot plausibly be admitted before client deadline
 	if deadline, ok := ctx.Deadline(); ok {
 		if time.Until(deadline) < pacingDelay {
 			t.mu.Unlock()
@@ -216,7 +216,7 @@ func (t *DualTokenBucketTracker) Reserve(ctx context.Context, id string, estimat
 		}
 	}
 
-	// 2. Check configured MaxPacingDelay (0 = no cap; the caller's deadline bounds the wait)
+	// Check configured MaxPacingDelay (0 = no cap; the caller's deadline bounds the wait)
 	if pacingDelay > 0 && t.cfg.MaxPacingDelay > 0 && pacingDelay > t.cfg.MaxPacingDelay {
 		t.mu.Unlock()
 		return nil, ErrInsufficientCapacity

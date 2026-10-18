@@ -57,6 +57,10 @@ Rate-limit benchmark: 100 requests, provider limited to 15 requests/second with 
 
 The theoretical minimum for this workload is 6.3s. With priority scheduling, `production` requests finish at p50 ≈ 2.1s while `batch` waits (p50 ≈ 6.6s). These numbers come from the embedded mock provider; reproduce with `go run ./cmd/benchmark -scenario rpm`.
 
+## Why not LiteLLM?
+
+LiteLLM solves "one app, many providers": routing, failover, virtual keys, spend. AegisLLM solves "many agents, one quota": learning the provider's limits, queuing by priority, fairness across runs, pacing so the limit is never hit, and holding the whole queue when the provider says `Retry-After`. LiteLLM counts and rejects; it does not queue, and its shared counters are per instance. The two stack: see [docs/litellm.md](docs/litellm.md).
+
 ## Configuration
 
 Most deployments need only the first three.
@@ -85,10 +89,15 @@ Most deployments need only the first three.
 
 ## Limits of this version
 
+- **No authentication on the listener.** Anyone who can reach the port spends your provider key. Bind to localhost or a private network until client keys land (next milestone).
 - **One instance.** Queue and quota state are in memory. Two instances behind a load balancer do not share a count; each sees the provider's `remaining` headers and backs off, but they will over-admit together. Multi-instance coordination is the next milestone.
 - **Streams aren't retried after the first byte.** If the provider drops mid-stream, the client gets the truncated stream.
 - **Token estimate is a heuristic** (≈4 chars/token plus `max_tokens`), corrected after each response. Good enough to pace; not exact.
 - **Azure** needs `-rpm`/`-tpm` set by hand; its headers carry no limits.
+
+## How this was built
+
+With heavy AI assistance, and every line reviewed. The concurrency paths run under the race detector in CI, the benchmark is reproducible from the repo, and the bugs found so far are recorded in the commit history rather than hidden. Judge the code, not the tooling.
 
 ## Development
 

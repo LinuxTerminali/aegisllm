@@ -165,7 +165,7 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		retryAfterStr = "1"
 	}
 
-	// 1. Check for caller-injected status code override
+	// Check for caller-injected status code override
 	if overrideCodeStr := r.Header.Get("X-Mock-Status"); overrideCodeStr != "" {
 		if code, err := strconv.Atoi(overrideCodeStr); err == nil && code >= 100 && code < 600 {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -184,7 +184,7 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 2. Refill and check token bucket rate limits (RPM and TPM)
+	// Refill and check token bucket rate limits (RPM and TPM)
 	m.mu.Lock()
 	m.refill(time.Now())
 
@@ -237,7 +237,7 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	remTok := int(m.tokTokens)
 	m.mu.Unlock()
 
-	// 3. Check for concurrency overload in mock
+	// Check for concurrency overload in mock
 	if m.config.MaxAllowedInFlight > 0 && current > int64(m.config.MaxAllowedInFlight) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Retry-After", retryAfterStr)
@@ -252,7 +252,7 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. Determine latency
+	// Determine latency
 	latency := m.config.BaseLatency
 	if delayOverride := r.Header.Get("X-Mock-Delay"); delayOverride != "" {
 		if d, err := time.ParseDuration(delayOverride); err == nil {
@@ -269,7 +269,7 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 5. Return valid OpenAI chat completion response with rate limit headers
+	// Return valid OpenAI chat completion response with rate limit headers
 	resp := ChatCompletionResponse{
 		ID:      fmt.Sprintf("chatcmpl-mock-%d", reqNum),
 		Object:  "chat.completion",

@@ -7,26 +7,26 @@ import (
 )
 
 func TestParseRetryAfter(t *testing.T) {
-	// 1. Integer seconds
+	// Integer seconds
 	d, ok := ParseRetryAfter("5")
 	if !ok || d != 5*time.Second {
 		t.Fatalf("expected 5s, got %v (ok=%v)", d, ok)
 	}
 
-	// 2. Float seconds
+	// Float seconds
 	d, ok = ParseRetryAfter("1.5")
 	if !ok || d != 1500*time.Millisecond {
 		t.Fatalf("expected 1.5s, got %v (ok=%v)", d, ok)
 	}
 
-	// 3. HTTP date in future
+	// HTTP date in future
 	futureTime := time.Now().Add(10 * time.Second).UTC().Format(time.RFC1123)
 	d, ok = ParseRetryAfter(futureTime)
 	if !ok || d < 8*time.Second || d > 12*time.Second {
 		t.Fatalf("expected ~10s from RFC1123 date, got %v (ok=%v)", d, ok)
 	}
 
-	// 4. Invalid or empty
+	// Invalid or empty
 	_, ok = ParseRetryAfter("")
 	if ok {
 		t.Fatalf("expected false for empty header")

@@ -183,10 +183,10 @@ func (s *Scheduler) Acquire(ctx context.Context, meta model.RequestMetadata, bod
 	s.totalRequests.Add(1)
 	start := time.Now()
 
-	// 1. Estimate token consumption
+	// Estimate token consumption
 	estTokens := s.estimator.Estimate(body).TotalTokens
 
-	// 2. Concurrency slot acquisition
+	// Concurrency slot acquisition
 	var waitDur time.Duration
 	s.mu.Lock()
 	if s.active < s.cfg.MaxConcurrency && s.pq.Len() == 0 {
@@ -239,7 +239,7 @@ func (s *Scheduler) Acquire(ctx context.Context, meta model.RequestMetadata, bod
 		}
 	}
 
-	// 3. Reserve capacity & pace (RPM and TPM). The wait is bounded by whatever is left of
+	// Reserve capacity & pace (RPM and TPM). The wait is bounded by whatever is left of
 	// MaxQueueWait so a request never waits longer in total than the configured queue deadline.
 	remaining := s.cfg.MaxQueueWait - time.Since(start)
 	if remaining <= 0 {

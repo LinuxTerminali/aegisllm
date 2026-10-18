@@ -90,7 +90,7 @@ func (h *Handlers) Status(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// Metrics exports Prometheus-compatible exposition metrics with strictly bounded cardinality.
+// Metrics exports Prometheus-compatible exposition metrics with bounded cardinality.
 func (h *Handlers) Metrics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		model.WriteJSONError(w, http.StatusMethodNotAllowed, "Method not allowed", "invalid_request_error", 405)
@@ -127,13 +127,13 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 
-	// 1. Generate or extract Request ID
+	// Generate or extract Request ID
 	reqID := r.Header.Get("X-Request-ID")
 	if reqID == "" {
 		reqID = generateRequestID()
 	}
 
-	// 2. Extract scheduling metadata from headers
+	// Extract scheduling metadata from headers
 	meta := model.ParseRequestMetadata(
 		reqID,
 		r.Header.Get("X-Run-ID"),
@@ -141,7 +141,7 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		r.Header.Get("X-Priority"),
 	)
 
-	// 3. Read bounded request body
+	// Read bounded request body
 	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodySize+1))
 	if err != nil {
 		model.WriteJSONError(w, http.StatusBadRequest, "Failed to read request body", "invalid_request_error", 400)
@@ -154,7 +154,7 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	_ = r.Body.Close()
 	wantsStream := upstream.IsStreamingRequest(bodyBytes)
 
-	// 4. Acquire execution lease from scheduler (with body for token estimation)
+	// Acquire execution lease from scheduler (with body for token estimation)
 	lease, err := h.scheduler.Acquire(r.Context(), meta, bodyBytes)
 	if err != nil {
 		if errors.Is(err, scheduler.ErrQueueFull) {
@@ -186,7 +186,7 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	h.metrics.RecordAccepted(meta.Priority, lease.WaitDuration())
 
-	// 5. Forward with coordinated retry loop
+	// Forward with coordinated retry loop
 	upstreamStart := time.Now()
 	rng := mathrand.New(mathrand.NewSource(time.Now().UnixNano()))
 	var resp *http.Response
@@ -278,14 +278,14 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// 5b. Streaming: pass events through as they arrive. Retries above only ever happen on
+	// Streaming: pass events through as they arrive. Retries above only ever happen on
 	// non-2xx responses, i.e. before the first byte of a stream reaches the client.
 	if wantsStream && resp.StatusCode == http.StatusOK {
 		h.streamResponse(w, r, resp, lease, meta, start, upstreamStart, retriesCount)
 		return
 	}
 
-	// 6. Read bounded response body
+	// Read bounded response body
 	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
 	if readErr == nil && resp.StatusCode == http.StatusOK {
 		if used := upstream.ParseUsageTokens(respBody); used > 0 {
@@ -293,7 +293,7 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 7. Copy upstream response headers (stripping hop-by-hop headers)
+	// Copy upstream response headers (stripping hop-by-hop headers)
 	copyUpstreamHeaders(w.Header(), resp.Header)
 
 	// Attach scheduler telemetry headers

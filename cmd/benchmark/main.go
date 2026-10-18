@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"math/rand"
 	"net/http"
@@ -120,6 +121,7 @@ func main() {
 	clientTimeout := flag.Duration("client-timeout", 0, "Override per-request client deadline for every run (0 = scenario default)")
 	autoLearn := flag.Bool("auto-learn", true, "Scheduler modes learn RPM/TPM from upstream headers instead of being configured with the limit")
 	flag.Parse()
+	log.SetOutput(io.Discard) // the proxy logs every request; keep benchmark output readable
 
 	// Apply scenario defaults if not explicitly overridden
 	switch *scenario {
@@ -143,13 +145,10 @@ func main() {
 		}
 	}
 
-	fmt.Printf("================================================================================\n")
-	fmt.Printf("LLM WORKLOAD SCHEDULER EXPERIMENTAL VALIDATION BENCHMARK\n")
-	fmt.Printf("Scenario: %s, Requests: %d, Seed: %d, Concurrency: %d, Burst: %d, RPM: %.1f, TPM: %.1f\n",
+	fmt.Printf("aegis benchmark: scenario=%s requests=%d seed=%d concurrency=%d burst=%d rpm=%.0f tpm=%.0f\n\n",
 		*scenario, *requestsCount, *seed, *upstreamConc, *burstCount, *rateLimitRPS*60, *rateLimitTPS*60)
-	fmt.Printf("================================================================================\n\n")
 
-	// 1. Generate identical workload
+	// Generate identical workload
 	workload := generateWorkload(*scenario, *requestsCount, *seed, *burstCount)
 	if *clientTimeout > 0 {
 		for i := range workload {
@@ -158,23 +157,23 @@ func main() {
 	}
 	schedKnowsLimits := !*autoLearn
 
-	// 2. Mode A: Direct requests with independent retries and jitter
-	fmt.Printf(">>> Running Mode A: Direct Upstream Calls (with Retries & Jitter)...\n")
+	// Mode A: Direct requests with independent retries and jitter
+	fmt.Printf("mode A: direct calls with retries and jitter\n")
 	reportA := runModeA(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst)
 
-	// 3. Mode B: Scheduler with FIFO Ordering
-	fmt.Printf(">>> Running Mode B: Bounded FIFO Scheduler...\n")
+	// Mode B: Scheduler with FIFO Ordering
+	fmt.Printf("mode B: FIFO scheduler\n")
 	reportB := runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyFIFO, "B. Bounded FIFO Scheduler", schedKnowsLimits)
 
-	// 4. Mode C: Scheduler with Priority Ordering
-	fmt.Printf(">>> Running Mode C: Priority-Aware Scheduler...\n")
+	// Mode C: Scheduler with Priority Ordering
+	fmt.Printf("mode C: priority scheduler\n")
 	reportC := runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyPriority, "C. Priority Scheduler", schedKnowsLimits)
 
-	// 5. Mode D: Fair Scheduler (Per-Run WDRR)
-	fmt.Printf(">>> Running Mode D: Fair Scheduler (Per-Run WDRR)...\n")
+	// Mode D: Fair Scheduler (Per-Run WDRR)
+	fmt.Printf("mode D: fair scheduler (per-run WDRR)\n")
 	reportD := runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyFair, "D. Fair Scheduler (WDRR)", schedKnowsLimits)
 
-	// 6. Print Comparison Summary
+	// Print Comparison Summary
 	reports := []BenchmarkReport{reportA, reportB, reportC, reportD}
 	printComparisonTable(reports)
 
@@ -714,9 +713,7 @@ func percentile(values []float64, pct float64) float64 {
 }
 
 func printComparisonTable(reports []BenchmarkReport) {
-	fmt.Printf("\n====================================================================================================\n")
-	fmt.Printf("BENCHMARK RESULTS SUMMARY\n")
-	fmt.Printf("====================================================================================================\n\n")
+	fmt.Printf("results\n\n")
 
 	fmt.Printf("%-32s | %-12s | %-12s | %-12s | %-12s\n", "Metric", "Mode A (Dir)", "Mode B (FIFO)", "Mode C (Prio)", "Mode D (Fair)")
 	fmt.Println(strings.Repeat("-", 95))
@@ -800,5 +797,4 @@ func printComparisonTable(reports []BenchmarkReport) {
 		fmt.Printf("  Mode D: %2d/%2d (%5.1f%%) -> %5.1f%% share | p50: %5.1fms\n",
 			reports[3].Runs[r].Completed, reports[3].Runs[r].TotalRequests, reports[3].Runs[r].SuccessRate, reports[3].Runs[r].ServiceShare, reports[3].Runs[r].P50LatencyMs)
 	}
-	fmt.Printf("\n====================================================================================================\n")
 }
