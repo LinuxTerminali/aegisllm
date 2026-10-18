@@ -42,6 +42,8 @@ type realTarget struct {
 
 var real *realTarget
 
+var verbose bool
+
 // endpointPath is the request path for the provider shape in use.
 func (t *realTarget) endpointPath() string {
 	if t.ProviderType == "anthropic" {
@@ -82,11 +84,12 @@ type RequestResult struct {
 	DurationMs     float64
 	IsTimeout      bool
 	IsCanceled     bool
-	ErrorBody      string // first bytes of a non-200 body, for diagnosis
-	IsRateLimited  bool   // Upstream 429
-	IsScheduler429 bool   // Scheduler 429 capacity_exceeded
-	IsQueueFull    bool   // Scheduler 503 queue_full
-	IsUpstream503  bool   // Upstream 503
+	ErrorBody      string  // first bytes of a non-200 body, for diagnosis
+	StartOffsetMs  float64 // when the client sent it, relative to the mode's start
+	IsRateLimited  bool    // Upstream 429
+	IsScheduler429 bool    // Scheduler 429 capacity_exceeded
+	IsQueueFull    bool    // Scheduler 503 queue_full
+	IsUpstream503  bool    // Upstream 503
 }
 
 // RunStats aggregates results for a single run ID.
@@ -156,7 +159,9 @@ func main() {
 	realKey := flag.String("upstream-api-key", os.Getenv("BENCH_API_KEY"), "API key for the real provider (or BENCH_API_KEY)")
 	realProvider := flag.String("provider-type", "openai", "Provider adapter for the real upstream: openai, anthropic, generic")
 	realModel := flag.String("model", "", "Model to request from the real provider (e.g. gpt-4o-mini, claude-3-5-haiku-latest, gemini-2.5-flash)")
+	verboseFlag := flag.Bool("verbose", false, "Keep the proxy's per-request logs and print a per-request timeline for every mode")
 	flag.Parse()
+	verbose = *verboseFlag
 
 	if *realURL != "" {
 		if *realModel == "" {
@@ -174,7 +179,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "real provider: %s (%s, model %s). Four modes x %d requests = %d provider calls; keep -requests small on free tiers.\n",
 			*realURL, real.ProviderType, real.Model, *requestsCount, 4**requestsCount)
 	}
-	log.SetOutput(io.Discard) // the proxy logs every request; keep benchmark output readable
+	if !verbose {
+		log.SetOutput(io.Discard) // the proxy logs every request; keep benchmark output readable
+	}
 
 	// Apply scenario defaults if not explicitly overridden
 	switch *scenario {
@@ -476,6 +483,7 @@ func runModeA(workload []WorkloadRequest, upstreamConcurrency int, rateLimitRPS 
 				Priority:      r.Priority,
 				Success:       success,
 				StatusCode:    lastStatusCode,
+				StartOffsetMs: reqStart.Sub(startTime).Seconds() * 1000.0,
 				Retries:       retries,
 				QueueWaitMs:   0,
 				DurationMs:    dur.Seconds() * 1000.0,
@@ -644,6 +652,7 @@ func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateL
 				Priority:       r.Priority,
 				Success:        success,
 				StatusCode:     resp.StatusCode,
+				StartOffsetMs:  reqStart.Sub(startTime).Seconds() * 1000.0,
 				Retries:        retries,
 				QueueWaitMs:    waitMs,
 				DurationMs:     dur.Seconds() * 1000.0,
@@ -663,7 +672,33 @@ func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateL
 	return analyzeResults(modeName, results, wallClock)
 }
 
+// printTimeline shows every request in completion order: when it was sent, how long it
+// waited in the scheduler, when it finished, with what status, and how many retries.
+func printTimeline(mode string, results []RequestResult) {
+	sorted := make([]RequestResult, len(results))
+	copy(sorted, results)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].StartOffsetMs+sorted[i].DurationMs < sorted[j].StartOffsetMs+sorted[j].DurationMs
+	})
+	fmt.Printf("\n%s timeline (sent -> done, ms from mode start)\n", mode)
+	fmt.Printf("%-4s %-12s %-20s %7s %8s %8s %6s %7s %s\n", "#", "class", "run", "sent", "wait", "done", "status", "retries", "note")
+	for _, r := range sorted {
+		note := ""
+		if !r.Success && r.ErrorBody != "" {
+			note = r.ErrorBody
+			if len(note) > 60 {
+				note = note[:60] + "..."
+			}
+		}
+		fmt.Printf("%-4d %-12s %-20s %7.0f %8.0f %8.0f %6d %7d %s\n",
+			r.Index, r.WorkloadClass, r.RunID, r.StartOffsetMs, r.QueueWaitMs, r.StartOffsetMs+r.DurationMs, r.StatusCode, r.Retries, note)
+	}
+}
+
 func analyzeResults(mode string, results []RequestResult, wallClock time.Duration) BenchmarkReport {
+	if verbose {
+		printTimeline(mode, results)
+	}
 	report := BenchmarkReport{
 		Mode:                mode,
 		TotalSubmitted:      len(results),
