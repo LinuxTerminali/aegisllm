@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -84,5 +85,28 @@ func TestPrepareRequest_ConfiguredKeyOverridesClientKey(t *testing.T) {
 	req2, _ := g.PrepareRequest(context.Background(), base, "/v1/chat/completions", in, []byte(`{}`))
 	if req2.Header.Get("Authorization") != "Bearer placeholder" {
 		t.Fatalf("pass-through credential lost")
+	}
+}
+
+func TestSanitizeError_GoogleArrayEnvelope(t *testing.T) {
+	p := NewGenericProvider("k", "", "", "")
+	body := []byte(`[{"error":{"code":402,"message":"Your prepayment credits are depleted. Please go to AI Studio.","status":"RESOURCE_EXHAUSTED"}}]`)
+	msg, typ := p.SanitizeError(402, body)
+	if !strings.Contains(msg, "prepayment credits are depleted") {
+		t.Fatalf("google message lost: %q", msg)
+	}
+	if typ != "resource_exhausted" {
+		t.Fatalf("expected status used as type, got %q", typ)
+	}
+
+	msg, typ = p.SanitizeError(402, []byte(`not json`))
+	if typ != "billing_error" || msg == "" {
+		t.Fatalf("402 fallback: %q %q", msg, typ)
+	}
+
+	// Object envelope still works and 401 stays generic.
+	msg, _ = p.SanitizeError(401, []byte(`{"error":{"message":"Incorrect API key provided: sk-abc","type":"invalid_request_error"}}`))
+	if strings.Contains(msg, "sk-abc") {
+		t.Fatalf("401 must not echo credential details: %q", msg)
 	}
 }

@@ -164,16 +164,40 @@ func (p *BaseProvider) ParseQuota(h http.Header) ProviderQuota {
 	return ParseProviderQuota(h)
 }
 
-func (p *BaseProvider) SanitizeError(statusCode int, body []byte) (string, string) {
-	var errResp struct {
-		Error struct {
-			Message string `json:"message"`
-			Type    string `json:"type"`
-			Code    any    `json:"code"`
-		} `json:"error"`
-	}
+// providerError is the error envelope OpenAI, Anthropic and Google all use, modulo the
+// field for the kind of error ("type" at OpenAI/Anthropic, "status" at Google).
+type providerError struct {
+	Error struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Status  string `json:"status"`
+		Code    any    `json:"code"`
+	} `json:"error"`
+}
 
-	if len(body) > 0 && json.Unmarshal(body, &errResp) == nil && errResp.Error.Message != "" {
+// parseProviderError accepts the envelope as an object or, as Google's OpenAI-compatible
+// endpoint sends it, as a single-element array.
+func parseProviderError(body []byte) (providerError, bool) {
+	var e providerError
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return e, false
+	}
+	if trimmed[0] == '[' {
+		var list []providerError
+		if json.Unmarshal(trimmed, &list) == nil && len(list) > 0 && list[0].Error.Message != "" {
+			return list[0], true
+		}
+		return e, false
+	}
+	if json.Unmarshal(trimmed, &e) == nil && e.Error.Message != "" {
+		return e, true
+	}
+	return e, false
+}
+
+func (p *BaseProvider) SanitizeError(statusCode int, body []byte) (string, string) {
+	if errResp, ok := parseProviderError(body); ok {
 		msg := RedactSecrets(errResp.Error.Message)
 		// On 401/403, never echo detailed credential errors
 		if statusCode == http.StatusUnauthorized {
@@ -184,6 +208,9 @@ func (p *BaseProvider) SanitizeError(statusCode int, body []byte) (string, strin
 		}
 		errType := errResp.Error.Type
 		if errType == "" {
+			errType = strings.ToLower(errResp.Error.Status)
+		}
+		if errType == "" {
 			errType = "upstream_error"
 		}
 		return msg, errType
@@ -191,6 +218,8 @@ func (p *BaseProvider) SanitizeError(statusCode int, body []byte) (string, strin
 
 	// Fallback based on HTTP status code
 	switch statusCode {
+	case http.StatusPaymentRequired:
+		return "Upstream provider billing or prepaid credits exhausted", "billing_error"
 	case http.StatusBadRequest:
 		return "Invalid request sent to upstream provider", "invalid_request_error"
 	case http.StatusUnauthorized:
