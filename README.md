@@ -74,7 +74,7 @@ Most deployments need only the first three.
 | `-max-concurrency` | `SCHEDULER_MAX_CONCURRENCY` | `32` | In-flight requests to the provider |
 | `-max-queue-size` | `SCHEDULER_MAX_QUEUE_SIZE` | `100` | Queued requests before new ones get 503 |
 | `-max-queue-wait` | `SCHEDULER_MAX_QUEUE_WAIT` | `30s` | Longest a request waits for a slot and quota before 504 |
-| `-rpm`, `-tpm` | `SCHEDULER_RPM`, `SCHEDULER_TPM` | learned | Override the limits learned from headers (required for Azure, which sends none) |
+| `-rpm`, `-tpm` | `SCHEDULER_RPM`, `SCHEDULER_TPM` | learned | Override the limits learned from headers (required for Azure, which sends none). Burst defaults to the full minute; `-request-burst`/`-token-burst` to lower it |
 | `-scheduling-policy` | `SCHEDULER_SCHEDULING_POLICY` | `fair` | `fair`, `priority`, `fifo` |
 | `-max-pacing-delay` | `SCHEDULER_MAX_PACING_DELAY` | `0` | Set positive to reject with 429 instead of waiting when quota is short |
 

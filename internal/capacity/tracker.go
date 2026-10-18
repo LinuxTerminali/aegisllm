@@ -137,7 +137,9 @@ func NewDualTokenBucketTracker(cfg Config) *DualTokenBucketTracker {
 func (t *DualTokenBucketTracker) setRequestLimit(rpm, burst float64, fill bool) {
 	t.reqRefillRPS = rpm / 60.0
 	if burst <= 0 {
-		burst = t.reqRefillRPS // Default burst to 1-second equivalent
+		// Providers enforce per-minute windows: "30 RPM" means 30 may go at once at the
+		// top of the window. Default the bucket to the whole window, not one second of it.
+		burst = rpm
 		if burst < 1.0 {
 			burst = 1.0
 		}
@@ -154,7 +156,7 @@ func (t *DualTokenBucketTracker) setRequestLimit(rpm, burst float64, fill bool) 
 func (t *DualTokenBucketTracker) setTokenLimit(tpm, burst float64, fill bool) {
 	t.tokRefillTPS = tpm / 60.0
 	if burst <= 0 {
-		burst = t.tokRefillTPS
+		burst = tpm
 		if burst < 100.0 {
 			burst = 100.0
 		}
