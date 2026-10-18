@@ -295,7 +295,6 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	m.setLimitHeaders(w)
 	if m.config.RateLimitRPS > 0 {
 		w.Header().Set("x-ratelimit-remaining-requests", strconv.Itoa(remReq))
@@ -306,6 +305,39 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("x-ratelimit-reset-tokens", "1s")
 	}
 
+	// Streaming: emit OpenAI-style SSE chunks, a final usage chunk, then [DONE].
+	if chatReq.Stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		words := []string{"Response", "from", "mock", "stream"}
+		for i, word := range words {
+			chunk := map[string]any{
+				"id": resp.ID, "object": "chat.completion.chunk", "created": resp.Created, "model": modelName,
+				"choices": []map[string]any{{"index": 0, "delta": map[string]any{"content": word + " "}, "finish_reason": nil}},
+			}
+			if i == len(words)-1 {
+				chunk["choices"] = []map[string]any{{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}
+			}
+			b, _ := json.Marshal(chunk)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		usageChunk, _ := json.Marshal(map[string]any{
+			"id": resp.ID, "object": "chat.completion.chunk", "created": resp.Created, "model": modelName,
+			"choices": []any{}, "usage": resp.Usage,
+		})
+		_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", usageChunk)
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
 }

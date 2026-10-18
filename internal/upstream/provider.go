@@ -64,10 +64,51 @@ func (p *BaseProvider) Name() string {
 	return p.name
 }
 
+// endpointSuffixes are the API routes the proxy serves. If the upstream base URL already
+// ends with one of them (Azure deployment URLs do: /openai/deployments/<name>/chat/completions)
+// the base URL is used as-is instead of appending the incoming path.
+var endpointSuffixes = []string{"/chat/completions", "/messages", "/completions", "/embeddings"}
+
+// JoinUpstreamPath resolves the upstream path for an incoming request path.
+//
+//   - base "https://api.openai.com/v1"  + "/v1/chat/completions" -> "/v1/chat/completions" (no /v1/v1)
+//   - base "https://host/openai/deployments/d/chat/completions?api-version=x" + anything -> unchanged
+//   - base "http://localhost:11434"     + "/v1/chat/completions" -> "/v1/chat/completions"
+//   - base "https://api.anthropic.com"  + "/v1/messages"         -> "/v1/messages"
+func JoinUpstreamPath(basePath, incoming string) string {
+	basePath = strings.TrimRight(basePath, "/")
+	if !strings.HasPrefix(incoming, "/") {
+		incoming = "/" + incoming
+	}
+	for _, suf := range endpointSuffixes {
+		if strings.HasSuffix(basePath, suf) {
+			return basePath
+		}
+	}
+	// Drop a duplicated leading segment (typically "/v1") already present at the end of base.
+	if i := strings.Index(incoming[1:], "/"); i > 0 {
+		first := incoming[:i+1] // e.g. "/v1"
+		if strings.HasSuffix(basePath, first) {
+			return basePath + incoming[i+1:]
+		}
+	}
+	return basePath + incoming
+}
+
 // PrepareRequest builds an http.Request stripping hop-by-hop & internal scheduler headers.
 func (p *BaseProvider) PrepareRequest(ctx context.Context, targetURL *url.URL, path string, incomingHeader http.Header, body []byte) (*http.Request, error) {
 	u := *targetURL
-	u.Path = strings.TrimRight(u.Path, "/") + path
+	// Keep the base URL's query string (Azure's api-version lives there).
+	incomingPath, incomingQuery, _ := strings.Cut(path, "?")
+	u.Path = JoinUpstreamPath(u.Path, incomingPath)
+	u.RawPath = ""
+	if incomingQuery != "" {
+		if u.RawQuery != "" {
+			u.RawQuery += "&" + incomingQuery
+		} else {
+			u.RawQuery = incomingQuery
+		}
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
 	if err != nil {
@@ -84,7 +125,10 @@ func (p *BaseProvider) PrepareRequest(ctx context.Context, targetURL *url.URL, p
 			strings.HasPrefix(lower, "x-scheduler-") ||
 			lower == "host" ||
 			lower == "connection" ||
-			lower == "content-length" {
+			lower == "content-length" ||
+			// Let Go's transport negotiate and transparently decode gzip; forwarding the
+			// client's Accept-Encoding would hand us compressed bytes we then try to parse.
+			lower == "accept-encoding" {
 			continue
 		}
 		for _, val := range vv {

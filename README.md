@@ -73,10 +73,14 @@ The proxy provides explicit provider adapters via `-provider-type`:
 
 | Provider Type | Identifier | Default Auth Header | Quota Headers Parsed |
 | :--- | :--- | :--- | :--- |
-| **OpenAI** (default) | `openai` | `Authorization: Bearer <key>` | `x-ratelimit-remaining-*`, `x-ratelimit-reset-*` |
+| **OpenAI** (default) | `openai` | `Authorization: Bearer <key>` | `x-ratelimit-limit-*`, `x-ratelimit-remaining-*`, `x-ratelimit-reset-*` |
 | **Anthropic** | `anthropic` | `x-api-key: <key>`, `anthropic-version` | `anthropic-ratelimit-*` (Messages API routed at `/v1/messages`) |
-| **Azure OpenAI** | `azure` | `api-key: <key>` | `x-ratelimit-*`, Azure standards |
+| **Azure OpenAI** | `azure` | `api-key: <key>` | `x-ratelimit-remaining-*` only – Azure sends no `*-limit-*` headers, so set `-rpm`/`-tpm` explicitly |
 | **Generic / Local** | `generic` | Configurable (`-auth-header-name`) | Standard IETF `RateLimit-*` & OpenAI-style |
+
+**Upstream URL rules.** `-upstream-url` may be a base (`https://api.openai.com`, `https://api.openai.com/v1`, `http://localhost:11434`) – the incoming path is appended without duplicating `/v1`. It may also be a full endpoint, which is how Azure works: `https://<res>.openai.azure.com/openai/deployments/<deployment>/chat/completions?api-version=2024-10-21`. A base URL ending in `/chat/completions`, `/messages`, `/completions` or `/embeddings` is used as-is and its query string is kept.
+
+**Streaming.** `"stream": true` requests are relayed event by event with a flush on every event boundary. Retries only happen on a non-2xx response, i.e. before the first byte of a stream reaches the client; a stream that starts is never re-issued. Token usage is reconciled from the stream itself (OpenAI final `usage` chunk when `stream_options.include_usage` is set; Anthropic `message_start` / `message_delta`).
 
 ### Defensive Quota Handling & Shared-Key Limits
 - Quota headers are treated as **advisory signals**, not authoritative truth.
@@ -248,5 +252,5 @@ Theoretical minimum for this workload is ~6.3s. With priority scheduling, `produ
    - All queue state and fairness histories are lost upon restart.
 2. **Multi-Replica Isolation**:
    - Multiple scheduler replicas do **not** coordinate rate limits or queues across instances. If deploying behind a load balancer, each replica operates independently. Upstream quota is shared across replicas only via downward response header synchronization.
-3. **Streaming Unsupported**:
-   - Streaming completions (`"stream": true` SSE) cannot be safely replayed on retry once initial chunks have been delivered to the client, and streaming token reconciliation is not yet supported. The proxy currently coordinates unary requests.
+3. **Streams are not retried once started**:
+   - A streamed response that fails mid-way is relayed as-is and the client sees the truncated stream; the proxy never re-issues a request after the first byte. Without usage events in the stream (OpenAI without `stream_options.include_usage`) the up-front token reservation stands unreconciled.

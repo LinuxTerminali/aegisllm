@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	crand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -151,6 +152,7 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = r.Body.Close()
+	wantsStream := upstream.IsStreamingRequest(bodyBytes)
 
 	// 4. Acquire execution lease from scheduler (with body for token estimation)
 	lease, err := h.scheduler.Acquire(r.Context(), meta, bodyBytes)
@@ -235,7 +237,7 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		resp, forwardErr = h.upstreamClient.Forward(r.Context(), r.URL.Path, r.Header, bodyBytes)
+		resp, forwardErr = h.upstreamClient.Forward(r.Context(), r.URL.RequestURI(), r.Header, bodyBytes)
 		if forwardErr != nil {
 			if errors.Is(forwardErr, r.Context().Err()) {
 				h.metrics.RecordCanceled()
@@ -276,6 +278,13 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	// 5b. Streaming: pass events through as they arrive. Retries above only ever happen on
+	// non-2xx responses, i.e. before the first byte of a stream reaches the client.
+	if wantsStream && resp.StatusCode == http.StatusOK {
+		h.streamResponse(w, r, resp, lease, meta, start, upstreamStart, retriesCount)
+		return
+	}
+
 	// 6. Read bounded response body
 	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
 	if readErr == nil && resp.StatusCode == http.StatusOK {
@@ -285,15 +294,7 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 7. Copy upstream response headers (stripping hop-by-hop headers)
-	for k, vv := range resp.Header {
-		lower := strings.ToLower(k)
-		if lower == "connection" || lower == "transfer-encoding" || lower == "content-length" {
-			continue
-		}
-		for _, v := range vv {
-			w.Header().Add(k, v)
-		}
-	}
+	copyUpstreamHeaders(w.Header(), resp.Header)
 
 	// Attach scheduler telemetry headers
 	w.Header().Set("X-Scheduler-Wait-Ms", strconv.FormatInt(lease.WaitDuration().Milliseconds(), 10))
@@ -330,6 +331,82 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		totalDur.Milliseconds(),
 		resp.StatusCode,
 	)
+}
+
+// copyUpstreamHeaders copies response headers to the client, dropping hop-by-hop ones.
+func copyUpstreamHeaders(dst, src http.Header) {
+	for k, vv := range src {
+		lower := strings.ToLower(k)
+		if lower == "connection" || lower == "transfer-encoding" || lower == "content-length" {
+			continue
+		}
+		for _, v := range vv {
+			dst.Add(k, v)
+		}
+	}
+}
+
+// streamResponse relays an SSE body line by line, flushing on every event boundary, and
+// reconciles token usage from the usage events the provider emits.
+func (h *Handlers) streamResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, lease *scheduler.Lease, meta model.RequestMetadata, start, upstreamStart time.Time, retriesCount int) {
+	copyUpstreamHeaders(w.Header(), resp.Header)
+	w.Header().Set("X-Scheduler-Wait-Ms", strconv.FormatInt(lease.WaitDuration().Milliseconds(), 10))
+	w.Header().Set("X-Scheduler-Run-ID", meta.RunID)
+	w.Header().Set("X-Scheduler-Priority", strconv.Itoa(meta.Priority))
+	w.Header().Set("X-Scheduler-Retries", strconv.Itoa(retriesCount))
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	flusher, _ := w.(http.Flusher)
+	flush := func() {
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	flush()
+
+	var usage upstream.StreamUsage
+	reader := bufio.NewReaderSize(resp.Body, 64*1024)
+	canceled := false
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			if _, werr := w.Write(line); werr != nil {
+				canceled = true
+				break
+			}
+			trimmed := strings.TrimRight(string(line), "\r\n")
+			if strings.HasPrefix(trimmed, "data:") {
+				usage.Observe([]byte(strings.TrimSpace(trimmed[len("data:"):])))
+			}
+			if trimmed == "" {
+				flush() // event boundary
+			}
+		}
+		if err != nil {
+			if err != io.EOF && r.Context().Err() != nil {
+				canceled = true
+			}
+			break
+		}
+	}
+	flush()
+
+	if used := usage.Total(); used > 0 {
+		lease.Reconcile(used)
+	}
+
+	totalDur := time.Since(start)
+	upstreamDur := time.Since(upstreamStart)
+	if canceled {
+		h.metrics.RecordCanceled()
+	} else {
+		h.metrics.RecordCompleted(totalDur, upstreamDur, http.StatusOK)
+	}
+
+	log.Printf("[SCHEDULER] req_id=%s run_id=%s class=%s priority=%d wait_ms=%d upstream_ms=%d total_ms=%d status=200 stream=true tokens=%d",
+		meta.RequestID, meta.RunID, meta.WorkloadClass, meta.Priority,
+		lease.WaitDuration().Milliseconds(), upstreamDur.Milliseconds(), totalDur.Milliseconds(), usage.Total())
 }
 
 func generateRequestID() string {
