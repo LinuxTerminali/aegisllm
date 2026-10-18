@@ -109,3 +109,24 @@ func TestTracker_MarkExhaustedHoldsReservations(t *testing.T) {
 		t.Fatalf("expected reservation to wait for Retry-After window, waited %v", el)
 	}
 }
+
+// Groq: x-ratelimit-limit-requests is a daily cap (reset in minutes), tokens is per minute.
+func TestTracker_IgnoresLimitsWithNonMinuteWindows(t *testing.T) {
+	tr := NewDualTokenBucketTracker(Config{AutoLearn: true})
+	h := http.Header{}
+	h.Set("x-ratelimit-limit-requests", "1000")
+	h.Set("x-ratelimit-remaining-requests", "998")
+	h.Set("x-ratelimit-reset-requests", "2m52.8s")
+	h.Set("x-ratelimit-limit-tokens", "8000")
+	h.Set("x-ratelimit-remaining-tokens", "7923")
+	h.Set("x-ratelimit-reset-tokens", "577ms")
+	tr.ReconcileHeaders(h)
+
+	st := tr.Stats()
+	if st.RequestsPerMinute != 0 {
+		t.Fatalf("daily request cap must not be learned as RPM, got %v", st.RequestsPerMinute)
+	}
+	if st.TokensPerMinute < 7999.9 || st.TokensPerMinute > 8000.1 || !st.LimitsLearned {
+		t.Fatalf("per-minute token limit should be learned, got %+v", st)
+	}
+}

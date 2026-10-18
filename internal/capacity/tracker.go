@@ -3,6 +3,7 @@ package capacity
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -102,6 +103,8 @@ type DualTokenBucketTracker struct {
 
 	// exhaustedUntil is set when the upstream rejects with 429; no reservation is admitted before it.
 	exhaustedUntil time.Time
+
+	warnedWindow map[string]bool
 
 	// Telemetry
 	totalReservations     atomic.Int64
@@ -378,7 +381,7 @@ func (t *DualTokenBucketTracker) ReconcileHeaders(h http.Header) {
 	// after a request has a bucket of ~5; OpenAI reports limit-1, i.e. a full-minute bucket.
 	// Starting small and growing is deliberate: conservative first, self-correcting on idle.
 	if t.cfg.AutoLearn {
-		if t.cfg.RequestsPerMinute <= 0 && quota.LimitRequests > 0 {
+		if t.cfg.RequestsPerMinute <= 0 && quota.LimitRequests > 0 && !t.skipNonMinuteWindow("requests", quota.LimitRequests, quota.ResetRequests) {
 			rpm := float64(quota.LimitRequests)
 			burst := t.maxReqTokens
 			if quota.HasRequestsQuota && float64(quota.RemainingRequests)+1 > burst {
@@ -395,7 +398,7 @@ func (t *DualTokenBucketTracker) ReconcileHeaders(h http.Header) {
 				t.learned = true
 			}
 		}
-		if t.cfg.TokensPerMinute <= 0 && quota.LimitTokens > 0 {
+		if t.cfg.TokensPerMinute <= 0 && quota.LimitTokens > 0 && !t.skipNonMinuteWindow("tokens", quota.LimitTokens, quota.ResetTokens) {
 			tpm := float64(quota.LimitTokens)
 			burst := t.maxTokTokens
 			if quota.HasTokensQuota && float64(quota.RemainingTokens) > burst {
@@ -429,6 +432,28 @@ func (t *DualTokenBucketTracker) ReconcileHeaders(h http.Header) {
 			t.tokTokens = reported
 		}
 	}
+}
+
+// maxMinuteWindowReset is the longest reset countdown a per-minute limit can report.
+// Anything longer describes a different window (Groq's x-ratelimit-limit-requests is a
+// daily cap with a multi-minute reset) and must not be learned as RPM/TPM.
+const maxMinuteWindowReset = 65 * time.Second
+
+// skipNonMinuteWindow reports whether a limit header belongs to a window longer than a
+// minute. Caller holds t.mu. Logs once per kind so the operator knows to set the flag.
+func (t *DualTokenBucketTracker) skipNonMinuteWindow(kind string, limit int, reset time.Duration) bool {
+	if reset <= maxMinuteWindowReset {
+		return false
+	}
+	if !t.warnedWindow[kind] {
+		if t.warnedWindow == nil {
+			t.warnedWindow = map[string]bool{}
+		}
+		t.warnedWindow[kind] = true
+		log.Printf("[CAPACITY] x-ratelimit-limit-%s=%d resets in %s: not a per-minute window, not learning it. Set -%s to the provider's per-minute limit.",
+			kind, limit, reset.Round(time.Second), map[string]string{"requests": "rpm", "tokens": "tpm"}[kind])
+	}
+	return true
 }
 
 // MarkExhausted records an upstream 429. The buckets are drained and, when the provider

@@ -125,7 +125,6 @@ func TestServer_SchedulerErrorsCarryRetryAfter(t *testing.T) {
 		_, _ = w.Write([]byte(`{"choices":[]}`))
 	}))
 	defer up.Close()
-	defer close(block)
 	client, _ := upstream.NewClient(upstream.ClientConfig{BaseURL: up.URL})
 	srv, _ := NewServer(config.ServerConfig{
 		ListenAddr: "127.0.0.1:0", UpstreamURL: up.URL,
@@ -133,6 +132,9 @@ func TestServer_SchedulerErrorsCarryRetryAfter(t *testing.T) {
 	}, client, nil)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
+	// Unblock the upstream before ts.Close() waits for in-flight handlers; the reverse
+	// order deadlocks until the upstream header timeout (60s) fires.
+	defer close(block)
 
 	body := `{"model":"m","messages":[]}`
 	go http.Post(ts.URL+"/v1/chat/completions", "application/json", strings.NewReader(body)) // takes the slot
