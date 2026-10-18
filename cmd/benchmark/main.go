@@ -26,6 +26,12 @@ import (
 	"github.com/LinuxTerminali/aegisllm/internal/upstream"
 )
 
+// readErrorBody returns up to 300 bytes of a response body for diagnosis.
+func readErrorBody(resp *http.Response) string {
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
+	return strings.TrimSpace(string(b))
+}
+
 // realTarget, when set, makes every mode call a real provider instead of the embedded mock.
 type realTarget struct {
 	URL          string
@@ -76,10 +82,11 @@ type RequestResult struct {
 	DurationMs     float64
 	IsTimeout      bool
 	IsCanceled     bool
-	IsRateLimited  bool // Upstream 429
-	IsScheduler429 bool // Scheduler 429 capacity_exceeded
-	IsQueueFull    bool // Scheduler 503 queue_full
-	IsUpstream503  bool // Upstream 503
+	ErrorBody      string // first bytes of a non-200 body, for diagnosis
+	IsRateLimited  bool   // Upstream 429
+	IsScheduler429 bool   // Scheduler 429 capacity_exceeded
+	IsQueueFull    bool   // Scheduler 503 queue_full
+	IsUpstream503  bool   // Upstream 503
 }
 
 // RunStats aggregates results for a single run ID.
@@ -118,6 +125,8 @@ type BenchmarkReport struct {
 	HTTP504Timeout      int                   `json:"http_504_timeout"`
 	CanceledCount       int                   `json:"canceled_count"`
 	OtherFailures       int                   `json:"other_failures"`
+	StatusCounts        map[int]int           `json:"status_counts"`          // every non-200 status seen
+	SampleError         string                `json:"sample_error,omitempty"` // first error body seen
 	TotalRetries        int                   `json:"total_retries"`
 	ThroughputRPS       float64               `json:"throughput_rps"`
 	WallClockDurationMs float64               `json:"wall_clock_duration_ms"`
@@ -220,6 +229,7 @@ func main() {
 	// Print Comparison Summary
 	reports := []BenchmarkReport{reportA, reportB, reportC, reportD}
 	printComparisonTable(reports)
+	printFailureBreakdown(reports)
 
 	if *jsonOut != "" {
 		data, err := json.MarshalIndent(reports, "", "  ")
@@ -373,6 +383,7 @@ func runModeA(workload []WorkloadRequest, upstreamConcurrency int, rateLimitRPS 
 
 			retries := 0
 			var lastStatusCode int
+			var lastErrBody string
 			var lastErr error
 			var lastRetryAfter time.Duration
 			success := false
@@ -433,6 +444,9 @@ func runModeA(workload []WorkloadRequest, upstreamConcurrency int, rateLimitRPS 
 				}
 
 				lastStatusCode = resp.StatusCode
+				if resp.StatusCode != http.StatusOK {
+					lastErrBody = readErrorBody(resp)
+				}
 				_, _ = io.Copy(io.Discard, resp.Body)
 				resp.Body.Close()
 
@@ -451,6 +465,9 @@ func runModeA(workload []WorkloadRequest, upstreamConcurrency int, rateLimitRPS 
 
 			dur := time.Since(reqStart)
 			isCanceled := lastErr == context.Canceled || (lastErr == context.DeadlineExceeded)
+			if lastErr != nil && lastErrBody == "" {
+				lastErrBody = lastErr.Error()
+			}
 
 			results[idx] = RequestResult{
 				Index:         idx,
@@ -466,6 +483,7 @@ func runModeA(workload []WorkloadRequest, upstreamConcurrency int, rateLimitRPS 
 				IsCanceled:    isCanceled,
 				IsRateLimited: lastStatusCode == http.StatusTooManyRequests,
 				IsUpstream503: lastStatusCode == http.StatusServiceUnavailable,
+				ErrorBody:     lastErrBody,
 			}
 		}(i, req)
 	}
@@ -596,6 +614,10 @@ func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateL
 				return
 			}
 			defer resp.Body.Close()
+			var errBody string
+			if resp.StatusCode != http.StatusOK {
+				errBody = readErrorBody(resp)
+			}
 			_, _ = io.Copy(io.Discard, resp.Body)
 
 			var waitMs float64
@@ -630,6 +652,7 @@ func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateL
 				IsQueueFull:    resp.StatusCode == http.StatusServiceUnavailable && schedErr == "queue_full",
 				IsUpstream503:  resp.StatusCode == http.StatusServiceUnavailable && schedErr == "",
 				IsTimeout:      resp.StatusCode == http.StatusGatewayTimeout || schedErr == "queue_timeout",
+				ErrorBody:      errBody,
 			}
 		}(i, req)
 	}
@@ -647,6 +670,7 @@ func analyzeResults(mode string, results []RequestResult, wallClock time.Duratio
 		WallClockDurationMs: wallClock.Seconds() * 1000.0,
 		Classes:             make(map[string]ClassStats),
 		Runs:                make(map[string]RunStats),
+		StatusCounts:        make(map[int]int),
 	}
 
 	var allLatencies []float64
@@ -674,6 +698,10 @@ func analyzeResults(mode string, results []RequestResult, wallClock time.Duratio
 			classWaitTimes[r.WorkloadClass] = append(classWaitTimes[r.WorkloadClass], r.QueueWaitMs)
 			runLatencies[r.RunID] = append(runLatencies[r.RunID], r.DurationMs)
 		} else {
+			report.StatusCounts[r.StatusCode]++
+			if report.SampleError == "" && r.ErrorBody != "" {
+				report.SampleError = fmt.Sprintf("HTTP %d: %s", r.StatusCode, r.ErrorBody)
+			}
 			if r.IsRateLimited {
 				report.HTTP429Upstream++
 			} else if r.IsScheduler429 {
@@ -787,6 +815,25 @@ func percentile(values []float64, pct float64) float64 {
 	return sorted[index]
 }
 
+// printFailureBreakdown never lets a failure disappear into a zero: every non-200 status
+// (0 = transport error) per mode, with one example body.
+func printFailureBreakdown(reports []BenchmarkReport) {
+	for _, rep := range reports {
+		if len(rep.StatusCounts) == 0 {
+			continue
+		}
+		var parts []string
+		for code, n := range rep.StatusCounts {
+			parts = append(parts, fmt.Sprintf("%d x%d", code, n))
+		}
+		sort.Strings(parts)
+		fmt.Printf("\n%s: non-200 statuses: %s\n", rep.Mode, strings.Join(parts, ", "))
+		if rep.SampleError != "" {
+			fmt.Printf("  example: %s\n", rep.SampleError)
+		}
+	}
+}
+
 func printComparisonTable(reports []BenchmarkReport) {
 	fmt.Printf("results\n\n")
 
@@ -809,6 +856,8 @@ func printComparisonTable(reports []BenchmarkReport) {
 		reports[0].HTTP504Timeout, reports[1].HTTP504Timeout, reports[2].HTTP504Timeout, reports[3].HTTP504Timeout)
 	fmt.Printf("%-32s | %-12d | %-12d | %-12d | %-12d\n", "Client Canceled / Deadline",
 		reports[0].CanceledCount, reports[1].CanceledCount, reports[2].CanceledCount, reports[3].CanceledCount)
+	fmt.Printf("%-32s | %-12d | %-12d | %-12d | %-12d\n", "Other Failures (unclassified)",
+		reports[0].OtherFailures, reports[1].OtherFailures, reports[2].OtherFailures, reports[3].OtherFailures)
 	fmt.Printf("%-32s | %-12d | %-12d | %-12d | %-12d\n", "Retries Issued",
 		reports[0].TotalRetries, reports[1].TotalRetries, reports[2].TotalRetries, reports[3].TotalRetries)
 	fmt.Printf("%-32s | %-11.1f  | %-11.1f  | %-11.1f  | %-11.1f\n", "Throughput (req/s)",
