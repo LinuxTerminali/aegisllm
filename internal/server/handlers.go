@@ -127,10 +127,12 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 
-	// Generate or extract Request ID
-	reqID := r.Header.Get("X-Request-ID")
-	if reqID == "" {
-		reqID = generateRequestID()
+	// The queue key is always ours: a client-supplied X-Request-ID may be reused across
+	// retries or shared by two clients, and a duplicate key corrupts the queue index.
+	// The client's ID is echoed back for correlation only.
+	reqID := generateRequestID()
+	if clientID := r.Header.Get("X-Request-ID"); clientID != "" {
+		w.Header().Set("X-Request-ID", clientID)
 	}
 
 	// Extract scheduling metadata from headers
@@ -160,18 +162,21 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, scheduler.ErrQueueFull) {
 			h.metrics.RecordRejection("queue_full")
 			w.Header().Set("X-Scheduler-Error", "queue_full")
+			w.Header().Set("Retry-After", "1")
 			model.WriteJSONError(w, http.StatusServiceUnavailable, "Scheduler queue is full, capacity exceeded", "capacity_exceeded", 503)
 			return
 		}
 		if errors.Is(err, capacity.ErrInsufficientCapacity) {
 			h.metrics.RecordRejection("capacity_exceeded")
 			w.Header().Set("X-Scheduler-Error", "capacity_exceeded")
+			w.Header().Set("Retry-After", retryAfterSeconds(h.scheduler.Stats().Capacity.ExhaustedUntilMs, 2))
 			model.WriteJSONError(w, http.StatusTooManyRequests, "Capacity rate limit quota exhausted and pacing delay exceeded", "rate_limit_exceeded", 429)
 			return
 		}
 		if errors.Is(err, scheduler.ErrWaitTimeout) {
 			h.metrics.RecordRejection("queue_timeout")
 			w.Header().Set("X-Scheduler-Error", "queue_timeout")
+			w.Header().Set("Retry-After", "5")
 			model.WriteJSONError(w, http.StatusGatewayTimeout, "Request exceeded maximum queue wait time", "timeout_error", 504)
 			return
 		}
@@ -220,6 +225,7 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 					}
 					h.metrics.RecordRejection("capacity_exceeded")
 					w.Header().Set("X-Scheduler-Error", "capacity_exceeded")
+					w.Header().Set("Retry-After", retryAfterSeconds(h.scheduler.Stats().Capacity.ExhaustedUntilMs, 2))
 					model.WriteJSONError(w, http.StatusTooManyRequests, "Capacity rate limit quota exhausted while retrying", "rate_limit_exceeded", 429)
 					return
 				}
@@ -407,6 +413,16 @@ func (h *Handlers) streamResponse(w http.ResponseWriter, r *http.Request, resp *
 	log.Printf("[SCHEDULER] req_id=%s run_id=%s class=%s priority=%d wait_ms=%d upstream_ms=%d total_ms=%d status=200 stream=true tokens=%d",
 		meta.RequestID, meta.RunID, meta.WorkloadClass, meta.Priority,
 		lease.WaitDuration().Milliseconds(), upstreamDur.Milliseconds(), totalDur.Milliseconds(), usage.Total())
+}
+
+// retryAfterSeconds turns a hold (ms) into a Retry-After value, with a floor so clients
+// never retry instantly against a proxy that just told them it is full.
+func retryAfterSeconds(holdMs int64, minSeconds int64) string {
+	sec := (holdMs + 999) / 1000
+	if sec < minSeconds {
+		sec = minSeconds
+	}
+	return strconv.FormatInt(sec, 10)
 }
 
 func generateRequestID() string {
