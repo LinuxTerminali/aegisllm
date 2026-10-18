@@ -163,7 +163,9 @@ func (s *Server) Addr() string {
 // Shutdown gracefully stops the server, waiting for active requests to finish.
 func (s *Server) Shutdown(ctx context.Context) error {
 	log.Printf("[SERVER] Initiating graceful shutdown...")
-	return s.httpServer.Shutdown(ctx)
+	err := s.httpServer.Shutdown(ctx)
+	s.scheduler.Stop()
+	return err
 }
 
 // Scheduler returns the underlying scheduler instance.

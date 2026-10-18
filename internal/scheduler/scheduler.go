@@ -132,6 +132,12 @@ type Scheduler struct {
 	mu     sync.Mutex
 	active int
 
+	// dispatch wakes the dispatcher when a slot frees or an item is enqueued.
+	dispatch chan struct{}
+	stop     chan struct{}
+	stopped  sync.Once
+	wg       sync.WaitGroup
+
 	totalRequests          atomic.Int64
 	totalAdmitted          atomic.Int64
 	totalCompleted         atomic.Int64
@@ -168,11 +174,90 @@ func NewSchedulerWithDependencies(cfg Config, tracker capacity.Tracker, est esti
 		est = estimation.NewHeuristicEstimator(estimation.DefaultConfig())
 	}
 
-	return &Scheduler{
+	s := &Scheduler{
 		cfg:       cfg,
 		pq:        queue.NewPriorityQueueWithWeights(cfg.MaxQueueSize, cfg.Policy, cfg.PriorityWeights),
 		tracker:   tracker,
 		estimator: est,
+		dispatch:  make(chan struct{}, 1),
+		stop:      make(chan struct{}),
+	}
+	s.wg.Add(1)
+	go s.runDispatcher()
+	return s
+}
+
+// Stop halts the dispatcher. Items still queued are failed with ErrWaitTimeout.
+func (s *Scheduler) Stop() {
+	s.stopped.Do(func() {
+		close(s.stop)
+		s.wg.Wait()
+		s.mu.Lock()
+		for {
+			item := s.pq.Dequeue()
+			if item == nil {
+				break
+			}
+			item.Err = ErrWaitTimeout
+			close(item.Ready)
+		}
+		s.mu.Unlock()
+	})
+}
+
+func (s *Scheduler) kick() {
+	select {
+	case s.dispatch <- struct{}{}:
+	default:
+	}
+}
+
+// runDispatcher is the single admission gate. It pops the highest-priority queued item,
+// waits for its quota (head of line only), then marks it ready. Because only the head is
+// paced, a production request that arrives mid-burst waits at most one pacing interval,
+// not behind every batch request that got in line before it.
+func (s *Scheduler) runDispatcher() {
+	defer s.wg.Done()
+	for {
+		select {
+		case <-s.stop:
+			return
+		case <-s.dispatch:
+		}
+		for {
+			s.mu.Lock()
+			if s.active >= s.cfg.MaxConcurrency || s.pq.Len() == 0 {
+				s.mu.Unlock()
+				break
+			}
+			item := s.pq.Dequeue()
+			s.active++
+			s.mu.Unlock()
+
+			deadline := item.EnqueuedAt.Add(s.cfg.MaxQueueWait)
+			pctx, cancel := context.WithDeadline(item.Ctx, deadline)
+			res, err := s.tracker.Reserve(pctx, item.ID, item.Tokens)
+			cancel()
+			if err != nil {
+				s.mu.Lock()
+				s.active--
+				s.mu.Unlock()
+				if errors.Is(err, context.DeadlineExceeded) && item.Ctx.Err() == nil {
+					err = ErrWaitTimeout
+				}
+				item.Err = err
+				close(item.Ready)
+				continue
+			}
+			item.Payload = res
+			close(item.Ready)
+
+			select {
+			case <-s.stop:
+				return
+			default:
+			}
+		}
 	}
 }
 
@@ -183,114 +268,89 @@ func (s *Scheduler) Acquire(ctx context.Context, meta model.RequestMetadata, bod
 	s.totalRequests.Add(1)
 	start := time.Now()
 
-	// Estimate token consumption
 	estTokens := s.estimator.Estimate(body).TotalTokens
 
-	// Concurrency slot acquisition
-	var waitDur time.Duration
+	// Fast path: a slot is free, nobody is waiting, and quota is available right now.
 	s.mu.Lock()
 	if s.active < s.cfg.MaxConcurrency && s.pq.Len() == 0 {
-		s.active++
-		s.mu.Unlock()
-		waitDur = 0
-	} else {
-		// Must enqueue
-		item := queue.NewItem(meta.RequestID, meta, ctx)
-		if err := s.pq.Enqueue(item); err != nil {
+		if res, ok := s.tracker.TryReserve(meta.RequestID, estTokens); ok {
+			s.active++
 			s.mu.Unlock()
-			s.totalRejectedQueueFull.Add(1)
-			return nil, ErrQueueFull
+			s.totalAdmitted.Add(1)
+			return &Lease{scheduler: s, meta: meta, reservation: res}, nil
 		}
+	}
+
+	// Otherwise queue by priority; the dispatcher admits in order and paces only the head.
+	item := queue.NewItem(meta.RequestID, meta, ctx)
+	item.Tokens = estTokens
+	if err := s.pq.Enqueue(item); err != nil {
 		s.mu.Unlock()
+		s.totalRejectedQueueFull.Add(1)
+		return nil, ErrQueueFull
+	}
+	s.mu.Unlock()
+	s.kick()
 
-		timer := time.NewTimer(s.cfg.MaxQueueWait)
-		defer timer.Stop()
+	timer := time.NewTimer(s.cfg.MaxQueueWait)
+	defer timer.Stop()
 
-		select {
-		case <-item.Ready:
-			if err := ctx.Err(); err != nil {
-				s.releaseSlot()
-				s.totalCanceled.Add(1)
-				return nil, err
-			}
-			waitDur = time.Since(start)
-
-		case <-ctx.Done():
-			_, err := s.pq.Remove(item.ID)
-			if err == nil {
-				s.totalCanceled.Add(1)
-				return nil, ctx.Err()
-			}
-			<-item.Ready
-			s.releaseSlot()
+	select {
+	case <-item.Ready:
+	case <-ctx.Done():
+		if _, err := s.pq.Remove(item.ID); err == nil {
 			s.totalCanceled.Add(1)
 			return nil, ctx.Err()
-
-		case <-timer.C:
-			_, err := s.pq.Remove(item.ID)
-			if err == nil {
-				s.totalTimedOut.Add(1)
-				return nil, ErrWaitTimeout
-			}
-			<-item.Ready
-			s.releaseSlot()
+		}
+		<-item.Ready // already taken by the dispatcher; its Reserve honours ctx
+	case <-timer.C:
+		if _, err := s.pq.Remove(item.ID); err == nil {
 			s.totalTimedOut.Add(1)
 			return nil, ErrWaitTimeout
 		}
+		<-item.Ready // dispatcher paces with the same deadline; it finishes momentarily
 	}
 
-	// Reserve capacity & pace (RPM and TPM). The wait is bounded by whatever is left of
-	// MaxQueueWait so a request never waits longer in total than the configured queue deadline.
-	remaining := s.cfg.MaxQueueWait - time.Since(start)
-	if remaining <= 0 {
-		s.releaseSlot()
-		s.totalTimedOut.Add(1)
-		return nil, ErrWaitTimeout
-	}
-	paceCtx, cancelPace := context.WithTimeout(ctx, remaining)
-	reservation, err := s.tracker.Reserve(paceCtx, meta.RequestID, estTokens)
-	cancelPace()
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-			// Our pacing deadline fired, not the caller's: report as a queue timeout.
-			s.releaseSlot()
-			s.totalTimedOut.Add(1)
-			return nil, ErrWaitTimeout
-		}
-		// Release acquired concurrency slot if pacing failed or context canceled
-		s.releaseSlot()
-		if errors.Is(err, ctx.Err()) {
+	if item.Err != nil {
+		switch {
+		case errors.Is(item.Err, ctx.Err()) && ctx.Err() != nil:
 			s.totalCanceled.Add(1)
-		} else {
+		case errors.Is(item.Err, ErrWaitTimeout):
+			s.totalTimedOut.Add(1)
+		case errors.Is(item.Err, capacity.ErrInsufficientCapacity):
+			s.totalRejectedCapacity.Add(1)
+		default:
 			s.totalRejectedCapacity.Add(1)
 		}
-		return nil, err
+		return nil, item.Err
+	}
+	if ctx.Err() != nil {
+		// Admitted a moment after the caller gave up: hand everything back.
+		res, _ := item.Payload.(*capacity.Reservation)
+		if res != nil {
+			s.tracker.Release(res)
+		}
+		s.releaseSlot()
+		s.totalCanceled.Add(1)
+		return nil, ctx.Err()
 	}
 
 	s.totalAdmitted.Add(1)
-	if paced := time.Since(start); paced > waitDur {
-		waitDur = paced
-	}
+	res, _ := item.Payload.(*capacity.Reservation)
 	return &Lease{
 		scheduler:    s,
 		meta:         meta,
-		waitDuration: waitDur,
-		reservation:  reservation,
+		waitDuration: time.Since(start),
+		reservation:  res,
 	}, nil
 }
 
 // releaseSlot yields an active concurrency slot.
 func (s *Scheduler) releaseSlot() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	next := s.pq.Dequeue()
-	if next == nil {
-		s.active--
-		return
-	}
-
-	close(next.Ready)
+	s.active--
+	s.mu.Unlock()
+	s.kick()
 }
 
 // ReconcileHeaders updates internal capacity tracker with provider response headers.

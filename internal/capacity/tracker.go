@@ -53,6 +53,9 @@ type Tracker interface {
 	Reconcile(res *Reservation, actualTokens int)
 	Release(res *Reservation)
 	ReconcileHeaders(h http.Header)
+	// TryReserve reserves capacity only if no pacing wait is needed right now.
+	// It never blocks and never deducts when it returns false.
+	TryReserve(id string, estimatedTokens int) (*Reservation, bool)
 	// MarkExhausted records an upstream rate-limit rejection so subsequent reservations
 	// wait at least retryAfter before being admitted.
 	MarkExhausted(retryAfter time.Duration)
@@ -164,6 +167,72 @@ func (t *DualTokenBucketTracker) setTokenLimit(tpm, burst float64, fill bool) {
 }
 
 // Reserve attempts to acquire request and token capacity, pacing sequentially if within MaxPacingDelay and client deadline.
+// pacingDelayLocked returns how long a reservation of estimatedTokens would have to wait.
+// Caller holds t.mu and has called refill(now).
+func (t *DualTokenBucketTracker) pacingDelayLocked(now time.Time, estimatedTokens int) time.Duration {
+	var pacingDelay time.Duration
+
+	// Upstream told us it is exhausted: nothing is admitted before that moment.
+	if t.exhaustedUntil.After(now) {
+		pacingDelay = t.exhaustedUntil.Sub(now)
+	}
+
+	if t.reqEnabled && t.reqTokens < 1.0 {
+		deficit := 1.0 - t.reqTokens
+		if delay := time.Duration(deficit / t.reqRefillRPS * float64(time.Second)); delay > pacingDelay {
+			pacingDelay = delay
+		}
+	}
+
+	if t.tokEnabled {
+		needed := float64(estimatedTokens)
+		if needed > t.maxTokTokens {
+			needed = t.maxTokTokens
+		}
+		if t.tokTokens < needed {
+			deficit := needed - t.tokTokens
+			if delay := time.Duration(deficit / t.tokRefillTPS * float64(time.Second)); delay > pacingDelay {
+				pacingDelay = delay
+			}
+		}
+	}
+	return pacingDelay
+}
+
+// deductLocked takes the reservation out of the buckets (balance may go negative to
+// space arrivals). Caller holds t.mu.
+func (t *DualTokenBucketTracker) deductLocked(estimatedTokens int) {
+	if t.reqEnabled {
+		t.reqTokens -= 1.0
+	}
+	if t.tokEnabled {
+		needed := float64(estimatedTokens)
+		if needed > t.maxTokTokens {
+			needed = t.maxTokTokens
+		}
+		t.tokTokens -= needed
+	}
+	t.totalReservations.Add(1)
+	t.totalTokensReserved.Add(int64(estimatedTokens))
+}
+
+// TryReserve admits immediately when no pacing is needed; otherwise returns false and
+// leaves the buckets untouched so the caller can queue the request by priority.
+func (t *DualTokenBucketTracker) TryReserve(id string, estimatedTokens int) (*Reservation, bool) {
+	if estimatedTokens < 1 {
+		estimatedTokens = 1
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := time.Now()
+	t.refill(now)
+	if t.pacingDelayLocked(now, estimatedTokens) > 0 {
+		return nil, false
+	}
+	t.deductLocked(estimatedTokens)
+	return &Reservation{ID: id, EstimatedTokens: estimatedTokens, ReservedAt: now, tracker: t}, true
+}
+
 func (t *DualTokenBucketTracker) Reserve(ctx context.Context, id string, estimatedTokens int) (*Reservation, error) {
 	if estimatedTokens < 1 {
 		estimatedTokens = 1
@@ -172,41 +241,7 @@ func (t *DualTokenBucketTracker) Reserve(ctx context.Context, id string, estimat
 	t.mu.Lock()
 	now := time.Now()
 	t.refill(now)
-
-	var pacingDelay time.Duration
-
-	// Upstream told us it is exhausted: nothing is admitted before that moment.
-	if t.exhaustedUntil.After(now) {
-		pacingDelay = t.exhaustedUntil.Sub(now)
-	}
-
-	// Check RPM deficit
-	if t.reqEnabled {
-		if t.reqTokens < 1.0 {
-			deficit := 1.0 - t.reqTokens
-			waitSec := deficit / t.reqRefillRPS
-			delay := time.Duration(waitSec * float64(time.Second))
-			if delay > pacingDelay {
-				pacingDelay = delay
-			}
-		}
-	}
-
-	// Check TPM deficit
-	if t.tokEnabled {
-		needed := float64(estimatedTokens)
-		if needed > t.maxTokTokens {
-			needed = t.maxTokTokens
-		}
-		if t.tokTokens < needed {
-			deficit := needed - t.tokTokens
-			waitSec := deficit / t.tokRefillTPS
-			delay := time.Duration(waitSec * float64(time.Second))
-			if delay > pacingDelay {
-				pacingDelay = delay
-			}
-		}
-	}
+	pacingDelay := t.pacingDelayLocked(now, estimatedTokens)
 
 	// Check deadline feasibility: request cannot plausibly be admitted before client deadline
 	if deadline, ok := ctx.Deadline(); ok {
@@ -222,20 +257,7 @@ func (t *DualTokenBucketTracker) Reserve(ctx context.Context, id string, estimat
 		return nil, ErrInsufficientCapacity
 	}
 
-	// Sequenced reservation: deduct capacity (allowing temporary negative balance to space arrivals)
-	if t.reqEnabled {
-		t.reqTokens -= 1.0
-	}
-	if t.tokEnabled {
-		needed := float64(estimatedTokens)
-		if needed > t.maxTokTokens {
-			needed = t.maxTokTokens
-		}
-		t.tokTokens -= needed
-	}
-
-	t.totalReservations.Add(1)
-	t.totalTokensReserved.Add(int64(estimatedTokens))
+	t.deductLocked(estimatedTokens)
 	if pacingDelay > 0 {
 		t.totalPacedRequests.Add(1)
 		t.totalPacingWaitMs.Add(pacingDelay.Milliseconds())

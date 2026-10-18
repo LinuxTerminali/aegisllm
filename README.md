@@ -40,7 +40,7 @@ Try it with no API key: `aegis -run-mock` starts an embedded fake provider with 
 1. Reads two optional headers: `X-Run-ID` (which task this belongs to) and `X-Workload-Class` (`production`, `interactive`, `background`, `batch`) or an explicit `X-Priority`.
 2. Estimates the request's token cost from the prompt and `max_tokens`.
 3. If quota and a concurrency slot are free, forwards immediately. Otherwise queues it: higher classes first; within a class, fair round-robin across run IDs so one run with 40 subagents can't starve a run with 2.
-4. Paces releases so the provider's per-minute limits are never exceeded.
+4. A single dispatcher admits from the head of that queue, waiting for quota only for the head. A production request arriving mid-burst therefore waits for at most one pacing interval, not behind every batch request already in line.
 5. Forwards to the provider with the proxy's API key. Retries 429/502/503/504 centrally with backoff and `Retry-After`. An upstream 429 drains the shared bucket so nothing else piles on.
 6. On the response, reads the provider's rate-limit headers to correct its view of the quota, and reconciles the token estimate with real usage.
 

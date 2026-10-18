@@ -16,6 +16,11 @@ type Item struct {
 	Ready      chan struct{}
 	Ctx        context.Context
 	Index      int // Position in heap, maintained by heap.Interface
+
+	// Set by the scheduler's dispatcher before Ready is closed.
+	Tokens  int   // estimated tokens, used to reserve quota for this item
+	Payload any   // the capacity reservation on success
+	Err     error // why the item could not be admitted
 }
 
 // NewItem creates an initialized Item.
