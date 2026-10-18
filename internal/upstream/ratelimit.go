@@ -28,17 +28,17 @@ func ParseRetryAfter(val string) (time.Duration, bool) {
 		return 0, false
 	}
 
-	// 1. Try parsing integer seconds
+	// Try parsing integer seconds
 	if sec, err := strconv.Atoi(trimmed); err == nil && sec >= 0 {
 		return time.Duration(sec) * time.Second, true
 	}
 
-	// 2. Try parsing float seconds (e.g. "1.5")
+	// Try parsing float seconds (e.g. "1.5")
 	if f, err := strconv.ParseFloat(trimmed, 64); err == nil && f >= 0 {
 		return time.Duration(f * float64(time.Second)), true
 	}
 
-	// 3. Try parsing HTTP Date formats (RFC1123, RFC850, ANSIC)
+	// Try parsing HTTP Date formats (RFC1123, RFC850, ANSIC)
 	formats := []string{
 		time.RFC1123,
 		time.RFC1123Z,
@@ -62,13 +62,13 @@ func ParseRetryAfter(val string) (time.Duration, bool) {
 // ParseProviderQuota extracts rate-limit quotas from HTTP response headers.
 // Handles OpenAI, Anthropic, and standard IETF rate-limit header conventions.
 //
-// NOTE: Quota headers are treated defensively as advisory signals rather than authoritative capacity.
+// NOTE: Quota headers are treated as hints, not as the source of truth.
 // In real deployments, API keys or organizational quotas are often shared across multiple proxy replicas,
 // worker pools, or interactive users. Header values may also be stale, contradictory, or malformed.
 func ParseProviderQuota(h http.Header) ProviderQuota {
 	q := ProviderQuota{}
 
-	// 1. OpenAI Style: x-ratelimit-remaining-requests, x-ratelimit-remaining-tokens
+	// OpenAI Style: x-ratelimit-remaining-requests, x-ratelimit-remaining-tokens
 	if remReq := getHeaderCaseInsensitive(h, "x-ratelimit-remaining-requests"); remReq != "" {
 		if v, err := strconv.Atoi(remReq); err == nil && v >= 0 && v <= 10_000_000 {
 			q.RemainingRequests = v
@@ -99,7 +99,7 @@ func ParseProviderQuota(h http.Header) ProviderQuota {
 		q.ResetTokens = parseDurationOrSeconds(resetTok)
 	}
 
-	// 2. Anthropic Style: anthropic-ratelimit-requests-remaining, anthropic-ratelimit-tokens-remaining
+	// Anthropic Style: anthropic-ratelimit-requests-remaining, anthropic-ratelimit-tokens-remaining
 	if !q.HasRequestsQuota {
 		if remReq := getHeaderCaseInsensitive(h, "anthropic-ratelimit-requests-remaining"); remReq != "" {
 			if v, err := strconv.Atoi(remReq); err == nil && v >= 0 && v <= 10_000_000 {
@@ -127,7 +127,7 @@ func ParseProviderQuota(h http.Header) ProviderQuota {
 		}
 	}
 
-	// 3. Standard IETF Style: RateLimit-Remaining, RateLimit-Limit, RateLimit-Reset
+	// Standard IETF Style: RateLimit-Remaining, RateLimit-Limit, RateLimit-Reset
 	if !q.HasRequestsQuota {
 		if remReq := getHeaderCaseInsensitive(h, "ratelimit-remaining"); remReq != "" {
 			if v, err := strconv.Atoi(remReq); err == nil && v >= 0 && v <= 10_000_000 {
@@ -145,7 +145,7 @@ func ParseProviderQuota(h http.Header) ProviderQuota {
 		}
 	}
 
-	// Defensive validation: discard contradictory numbers where remaining greatly exceeds limit
+	// Discard contradictory numbers where remaining greatly exceeds limit
 	if q.LimitRequests > 0 && q.RemainingRequests > q.LimitRequests*5 {
 		q.HasRequestsQuota = false
 	}

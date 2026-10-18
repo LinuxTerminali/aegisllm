@@ -64,10 +64,60 @@ func (p *BaseProvider) Name() string {
 	return p.name
 }
 
+// endpointSuffixes are the API routes the proxy serves. If the upstream base URL already
+// ends with one of them (Azure deployment URLs do: /openai/deployments/<name>/chat/completions)
+// the base URL is used as-is instead of appending the incoming path.
+var endpointSuffixes = []string{"/chat/completions", "/messages", "/completions", "/embeddings"}
+
+// JoinUpstreamPath resolves the upstream path for an incoming request path.
+//
+// Rules, in order:
+//
+//   - base already ends with an endpoint (Azure deployment URLs): use base as-is
+//
+//   - base has a path (it carries the provider's API version: /v1, /v1beta/openai,
+//     /openai/v1, /api/v1): drop the incoming "/v1" and append the rest
+//
+//   - base is a bare host: append the incoming path unchanged
+//
+//     https://api.openai.com                      + /v1/chat/completions -> /v1/chat/completions
+//     https://api.openai.com/v1                   + /v1/chat/completions -> /v1/chat/completions
+//     https://generativelanguage.googleapis.com/v1beta/openai + /v1/chat/completions -> /v1beta/openai/chat/completions
+//     https://api.groq.com/openai/v1              + /v1/chat/completions -> /openai/v1/chat/completions
+//     http://localhost:11434                      + /v1/chat/completions -> /v1/chat/completions
+//     https://api.anthropic.com                   + /v1/messages         -> /v1/messages
+func JoinUpstreamPath(basePath, incoming string) string {
+	basePath = strings.TrimRight(basePath, "/")
+	if !strings.HasPrefix(incoming, "/") {
+		incoming = "/" + incoming
+	}
+	for _, suf := range endpointSuffixes {
+		if strings.HasSuffix(basePath, suf) {
+			return basePath
+		}
+	}
+	if basePath != "" {
+		if rest, ok := strings.CutPrefix(incoming, "/v1/"); ok {
+			return basePath + "/" + rest
+		}
+	}
+	return basePath + incoming
+}
+
 // PrepareRequest builds an http.Request stripping hop-by-hop & internal scheduler headers.
 func (p *BaseProvider) PrepareRequest(ctx context.Context, targetURL *url.URL, path string, incomingHeader http.Header, body []byte) (*http.Request, error) {
 	u := *targetURL
-	u.Path = strings.TrimRight(u.Path, "/") + path
+	// Keep the base URL's query string (Azure's api-version lives there).
+	incomingPath, incomingQuery, _ := strings.Cut(path, "?")
+	u.Path = JoinUpstreamPath(u.Path, incomingPath)
+	u.RawPath = ""
+	if incomingQuery != "" {
+		if u.RawQuery != "" {
+			u.RawQuery += "&" + incomingQuery
+		} else {
+			u.RawQuery = incomingQuery
+		}
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
 	if err != nil {
@@ -84,7 +134,10 @@ func (p *BaseProvider) PrepareRequest(ctx context.Context, targetURL *url.URL, p
 			strings.HasPrefix(lower, "x-scheduler-") ||
 			lower == "host" ||
 			lower == "connection" ||
-			lower == "content-length" {
+			lower == "content-length" ||
+			// Let Go's transport negotiate and transparently decode gzip; forwarding the
+			// client's Accept-Encoding would hand us compressed bytes we then try to parse.
+			lower == "accept-encoding" {
 			continue
 		}
 		for _, val := range vv {
@@ -94,8 +147,13 @@ func (p *BaseProvider) PrepareRequest(ctx context.Context, targetURL *url.URL, p
 
 	req.Header.Set("Content-Type", "application/json")
 
-	// Inject authentication header if configured and not already set by caller
-	if p.apiKey != "" && req.Header.Get(p.authHeaderName) == "" {
+	// When the proxy holds the provider key, it is the only credential that reaches the
+	// provider. Clients then send any placeholder (SDKs refuse to start without one) and
+	// never need the real key. Without a configured key, the caller's credential passes through.
+	if p.apiKey != "" {
+		for _, h := range []string{"Authorization", "x-api-key", "api-key"} {
+			req.Header.Del(h)
+		}
 		req.Header.Set(p.authHeaderName, p.authHeaderPrefix+p.apiKey)
 	}
 
@@ -106,16 +164,40 @@ func (p *BaseProvider) ParseQuota(h http.Header) ProviderQuota {
 	return ParseProviderQuota(h)
 }
 
-func (p *BaseProvider) SanitizeError(statusCode int, body []byte) (string, string) {
-	var errResp struct {
-		Error struct {
-			Message string `json:"message"`
-			Type    string `json:"type"`
-			Code    any    `json:"code"`
-		} `json:"error"`
-	}
+// providerError is the error envelope OpenAI, Anthropic and Google all use, modulo the
+// field for the kind of error ("type" at OpenAI/Anthropic, "status" at Google).
+type providerError struct {
+	Error struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Status  string `json:"status"`
+		Code    any    `json:"code"`
+	} `json:"error"`
+}
 
-	if len(body) > 0 && json.Unmarshal(body, &errResp) == nil && errResp.Error.Message != "" {
+// parseProviderError accepts the envelope as an object or, as Google's OpenAI-compatible
+// endpoint sends it, as a single-element array.
+func parseProviderError(body []byte) (providerError, bool) {
+	var e providerError
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return e, false
+	}
+	if trimmed[0] == '[' {
+		var list []providerError
+		if json.Unmarshal(trimmed, &list) == nil && len(list) > 0 && list[0].Error.Message != "" {
+			return list[0], true
+		}
+		return e, false
+	}
+	if json.Unmarshal(trimmed, &e) == nil && e.Error.Message != "" {
+		return e, true
+	}
+	return e, false
+}
+
+func (p *BaseProvider) SanitizeError(statusCode int, body []byte) (string, string) {
+	if errResp, ok := parseProviderError(body); ok {
 		msg := RedactSecrets(errResp.Error.Message)
 		// On 401/403, never echo detailed credential errors
 		if statusCode == http.StatusUnauthorized {
@@ -126,6 +208,9 @@ func (p *BaseProvider) SanitizeError(statusCode int, body []byte) (string, strin
 		}
 		errType := errResp.Error.Type
 		if errType == "" {
+			errType = strings.ToLower(errResp.Error.Status)
+		}
+		if errType == "" {
 			errType = "upstream_error"
 		}
 		return msg, errType
@@ -133,6 +218,8 @@ func (p *BaseProvider) SanitizeError(statusCode int, body []byte) (string, strin
 
 	// Fallback based on HTTP status code
 	switch statusCode {
+	case http.StatusPaymentRequired:
+		return "Upstream provider billing or prepaid credits exhausted", "billing_error"
 	case http.StatusBadRequest:
 		return "Invalid request sent to upstream provider", "invalid_request_error"
 	case http.StatusUnauthorized:

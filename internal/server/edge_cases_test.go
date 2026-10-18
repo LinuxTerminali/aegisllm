@@ -18,8 +18,8 @@ import (
 	"github.com/LinuxTerminali/aegisllm/internal/scheduler"
 )
 
-// 1. Test concurrent requests competing for the final available capacity slot
-func TestAdversarial_ConcurrentCapacityCompetition(t *testing.T) {
+// Test concurrent requests competing for the final available capacity slot
+func TestServer_ConcurrentCapacityCompetition(t *testing.T) {
 	upstreamHit := atomic.Int64{}
 	upBlock := make(chan struct{})
 
@@ -100,8 +100,8 @@ func TestAdversarial_ConcurrentCapacityCompetition(t *testing.T) {
 	}
 }
 
-// 2. Cancellation during pacing, queue wait, upstream execution, and retry backoff
-func TestAdversarial_CancellationsAcrossLifecycle(t *testing.T) {
+// Cancellation during pacing, queue wait, upstream execution, and retry backoff
+func TestServer_CancellationAtEachStage(t *testing.T) {
 	t.Run("CancellationDuringPacing", func(t *testing.T) {
 		// Setup tracker with tight RPM so next request is forced to pace
 		capCfg := capacity.Config{
@@ -245,8 +245,8 @@ func TestAdversarial_CancellationsAcrossLifecycle(t *testing.T) {
 	})
 }
 
-// 3. Provider quota headers disagree with local estimates or are malformed
-func TestAdversarial_DisagreeingAndMalformedQuotaHeaders(t *testing.T) {
+// Provider quota headers disagree with local estimates or are malformed
+func TestServer_MalformedQuotaHeadersIgnored(t *testing.T) {
 	var respHeaders http.Header
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -311,8 +311,8 @@ func TestAdversarial_DisagreeingAndMalformedQuotaHeaders(t *testing.T) {
 	}
 }
 
-// 4. Missing or malformed usage metadata
-func TestAdversarial_MissingOrMalformedUsageMetadata(t *testing.T) {
+// Missing or malformed usage metadata
+func TestServer_MissingUsageMetadata(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// Missing usage object entirely
@@ -347,8 +347,8 @@ func TestAdversarial_MissingOrMalformedUsageMetadata(t *testing.T) {
 	}
 }
 
-// 5. Provider returning repeated 429s with Retry-After
-func TestAdversarial_Repeated429sWithRetryAfter(t *testing.T) {
+// Provider returning repeated 429s with Retry-After
+func TestServer_Repeated429sWithRetryAfter(t *testing.T) {
 	calls := atomic.Int64{}
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -395,8 +395,8 @@ func TestAdversarial_Repeated429sWithRetryAfter(t *testing.T) {
 	}
 }
 
-// 6. Permanent errors (400, 401, 403) are never retried
-func TestAdversarial_PermanentErrorsNeverRetried(t *testing.T) {
+// Permanent errors (400, 401, 403) are never retried
+func TestServer_PermanentErrorsNotRetried(t *testing.T) {
 	calls := atomic.Int64{}
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -433,8 +433,8 @@ func TestAdversarial_PermanentErrorsNeverRetried(t *testing.T) {
 	}
 }
 
-// 7. Transient 502/503/504 errors are retried and can recover
-func TestAdversarial_Transient5xxRetriedAndRecovers(t *testing.T) {
+// Transient 502/503/504 errors are retried and can recover
+func TestServer_Transient5xxRetried(t *testing.T) {
 	calls := atomic.Int64{}
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c := calls.Add(1)
@@ -477,8 +477,8 @@ func TestAdversarial_Transient5xxRetriedAndRecovers(t *testing.T) {
 	}
 }
 
-// 8. Queue saturation with mixed priorities and multiple runs
-func TestAdversarial_QueueSaturation_MixedPrioritiesMultipleRuns(t *testing.T) {
+// Queue saturation with mixed priorities and multiple runs
+func TestServer_QueueSaturationMixedRuns(t *testing.T) {
 	upBlock := make(chan struct{})
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-upBlock
@@ -556,8 +556,8 @@ func TestAdversarial_QueueSaturation_MixedPrioritiesMultipleRuns(t *testing.T) {
 	wg.Wait()
 }
 
-// 9. Slow / non-responsive upstream with timeout
-func TestAdversarial_SlowUpstreamTimeout(t *testing.T) {
+// Slow / non-responsive upstream with timeout
+func TestServer_SlowUpstreamTimeout(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(1 * time.Second) // Slow upstream
 	}))
@@ -593,8 +593,8 @@ func TestAdversarial_SlowUpstreamTimeout(t *testing.T) {
 	}
 }
 
-// 10. Graceful shutdown while requests are queued and executing
-func TestAdversarial_GracefulShutdownDraining(t *testing.T) {
+// Graceful shutdown while requests are queued and executing
+func TestServer_ShutdownDrainsInFlight(t *testing.T) {
 	upBlock := make(chan struct{})
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-upBlock
@@ -660,7 +660,7 @@ func TestAdversarial_GracefulShutdownDraining(t *testing.T) {
 	}
 }
 
-// 11. Operational Observability /status and /metrics validation
+// Operational Observability /status and /metrics validation
 func TestServer_ObservabilityEndpoints(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -678,13 +678,13 @@ func TestServer_ObservabilityEndpoints(t *testing.T) {
 	proxy := httptest.NewServer(srv.Handler())
 	defer proxy.Close()
 
-	// 1. Send completion request
+	// Send completion request
 	req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/v1/chat/completions", bytes.NewReader([]byte(`{}`)))
 	req.Header.Set("X-Workload-Class", "production")
 	resp, _ := http.DefaultClient.Do(req)
 	_ = resp.Body.Close()
 
-	// 2. Query /status
+	// Query /status
 	statusResp, err := http.Get(proxy.URL + "/status")
 	if err != nil || statusResp.StatusCode != 200 {
 		t.Fatalf("GET /status failed: %v", err)
@@ -700,7 +700,7 @@ func TestServer_ObservabilityEndpoints(t *testing.T) {
 		t.Errorf("expected 1 accepted and completed request in /status, got %+v", st.Metrics)
 	}
 
-	// 3. Query /metrics
+	// Query /metrics
 	metricsResp, err := http.Get(proxy.URL + "/metrics")
 	if err != nil || metricsResp.StatusCode != 200 {
 		t.Fatalf("GET /metrics failed: %v", err)

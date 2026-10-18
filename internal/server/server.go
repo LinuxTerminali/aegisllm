@@ -43,6 +43,7 @@ func NewServer(cfg config.ServerConfig, client *upstream.Client, s *scheduler.Sc
 			TokensPerMinute:   cfg.TokensPerMinute,
 			TokenBurst:        cfg.TokenBurst,
 			MaxPacingDelay:    cfg.MaxPacingDelay,
+			AutoLearn:         cfg.AutoLearnLimits,
 		})
 		est := estimation.NewHeuristicEstimator(estimation.DefaultConfig())
 
@@ -93,7 +94,10 @@ func NewServer(cfg config.ServerConfig, client *upstream.Client, s *scheduler.Sc
 	handlers := NewHandlers(s, client, rp, m)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/chat/completions", handlers.ChatCompletions)
+	// Every provider call under /v1/ goes through the scheduler: chat/completions, messages,
+	// messages/count_tokens, completions, embeddings, responses. The handler is body-agnostic;
+	// the estimator falls back to a byte-length heuristic for shapes it does not know.
+	mux.HandleFunc("/v1/", handlers.ChatCompletions)
 	mux.HandleFunc("/healthz", handlers.Healthz)
 	mux.HandleFunc("/status", handlers.Status)
 	mux.HandleFunc("/metrics", handlers.Metrics)
@@ -159,7 +163,9 @@ func (s *Server) Addr() string {
 // Shutdown gracefully stops the server, waiting for active requests to finish.
 func (s *Server) Shutdown(ctx context.Context) error {
 	log.Printf("[SERVER] Initiating graceful shutdown...")
-	return s.httpServer.Shutdown(ctx)
+	err := s.httpServer.Shutdown(ctx)
+	s.scheduler.Stop()
+	return err
 }
 
 // Scheduler returns the underlying scheduler instance.

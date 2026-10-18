@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"math/rand"
 	"net/http"
@@ -24,6 +25,37 @@ import (
 	"github.com/LinuxTerminali/aegisllm/internal/server"
 	"github.com/LinuxTerminali/aegisllm/internal/upstream"
 )
+
+// readErrorBody returns up to 300 bytes of a response body for diagnosis.
+func readErrorBody(resp *http.Response) string {
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
+	return strings.TrimSpace(string(b))
+}
+
+// realTarget, when set, makes every mode call a real provider instead of the embedded mock.
+type realTarget struct {
+	URL          string
+	APIKey       string
+	ProviderType string
+	Model        string
+}
+
+var real *realTarget
+
+var verbose bool
+
+// endpointPath is the request path for the provider shape in use.
+func (t *realTarget) endpointPath() string {
+	if t.ProviderType == "anthropic" {
+		return "/v1/messages"
+	}
+	return "/v1/chat/completions"
+}
+
+// requestBody builds the smallest valid request for the provider shape in use.
+func (t *realTarget) requestBody(content string) string {
+	return fmt.Sprintf(`{"model":%q,"max_tokens":5,"messages":[{"role":"user","content":%q}]}`, t.Model, content)
+}
 
 // WorkloadRequest defines a deterministic request in the test workload.
 type WorkloadRequest struct {
@@ -52,10 +84,12 @@ type RequestResult struct {
 	DurationMs     float64
 	IsTimeout      bool
 	IsCanceled     bool
-	IsRateLimited  bool // Upstream 429
-	IsScheduler429 bool // Scheduler 429 capacity_exceeded
-	IsQueueFull    bool // Scheduler 503 queue_full
-	IsUpstream503  bool // Upstream 503
+	ErrorBody      string  // first bytes of a non-200 body, for diagnosis
+	StartOffsetMs  float64 // when the client sent it, relative to the mode's start
+	IsRateLimited  bool    // Upstream 429
+	IsScheduler429 bool    // Scheduler 429 capacity_exceeded
+	IsQueueFull    bool    // Scheduler 503 queue_full
+	IsUpstream503  bool    // Upstream 503
 }
 
 // RunStats aggregates results for a single run ID.
@@ -94,6 +128,8 @@ type BenchmarkReport struct {
 	HTTP504Timeout      int                   `json:"http_504_timeout"`
 	CanceledCount       int                   `json:"canceled_count"`
 	OtherFailures       int                   `json:"other_failures"`
+	StatusCounts        map[int]int           `json:"status_counts"`          // every non-200 status seen
+	SampleError         string                `json:"sample_error,omitempty"` // first error body seen
 	TotalRetries        int                   `json:"total_retries"`
 	ThroughputRPS       float64               `json:"throughput_rps"`
 	WallClockDurationMs float64               `json:"wall_clock_duration_ms"`
@@ -117,7 +153,48 @@ func main() {
 	rateLimitTPS := flag.Float64("rate-limit-tps", 0, "Optional upstream token bucket rate limit TPS (0 = disabled)")
 	rateLimitTokenBurst := flag.Int("rate-limit-token-burst", 0, "Optional upstream token bucket token burst capacity")
 	jsonOut := flag.String("json-out", "", "Path to write JSON benchmark report")
+	clientTimeout := flag.Duration("client-timeout", 0, "Override per-request client deadline for every run (0 = scenario default)")
+	autoLearn := flag.Bool("auto-learn", true, "Scheduler modes learn RPM/TPM from upstream headers instead of being configured with the limit")
+	realURL := flag.String("upstream-url", "", "Run against a real provider at this base URL instead of the embedded mock (e.g. https://api.openai.com, https://api.anthropic.com, https://generativelanguage.googleapis.com/v1beta/openai)")
+	realKey := flag.String("upstream-api-key", os.Getenv("BENCH_API_KEY"), "API key for the real provider (or BENCH_API_KEY)")
+	realProvider := flag.String("provider-type", "openai", "Provider adapter for the real upstream: openai, anthropic, generic")
+	realModel := flag.String("model", "", "Model to request from the real provider (e.g. gpt-4o-mini, claude-3-5-haiku-latest, gemini-2.5-flash)")
+	verboseFlag := flag.Bool("verbose", false, "Keep the proxy's per-request logs and print a per-request timeline for every mode")
+	modesFlag := flag.String("modes", "A,B,C,D", "Which modes to run, e.g. A,C. Skipped modes show as zeros in the table")
+	cooldown := flag.Duration("cooldown", -1, "Pause between modes so a real provider's window refills (default 65s with -upstream-url, 0 for the mock)")
 	flag.Parse()
+	verbose = *verboseFlag
+
+	if *cooldown < 0 {
+		*cooldown = 0
+		if *realURL != "" {
+			*cooldown = 65 * time.Second
+		}
+	}
+	wantMode := map[string]bool{}
+	for _, m := range strings.Split(strings.ToUpper(*modesFlag), ",") {
+		wantMode[strings.TrimSpace(m)] = true
+	}
+
+	if *realURL != "" {
+		if *realModel == "" {
+			fmt.Fprintln(os.Stderr, "-model is required with -upstream-url")
+			os.Exit(2)
+		}
+		real = &realTarget{URL: *realURL, APIKey: *realKey, ProviderType: strings.ToLower(*realProvider), Model: *realModel}
+		if *clientTimeout == 0 {
+			*clientTimeout = 60 * time.Second
+		}
+		if *rateLimitRPS == 0 && !*autoLearn {
+			fmt.Fprintln(os.Stderr, "with -auto-learn=false against a real provider, pass -rate-limit-rps (and -rate-limit-tps) so the scheduler knows the limit")
+			os.Exit(2)
+		}
+		fmt.Fprintf(os.Stderr, "real provider: %s (%s, model %s). Four modes x %d requests = %d provider calls; keep -requests small on free tiers.\n",
+			*realURL, real.ProviderType, real.Model, *requestsCount, 4**requestsCount)
+	}
+	if !verbose {
+		log.SetOutput(io.Discard) // the proxy logs every request; keep benchmark output readable
+	}
 
 	// Apply scenario defaults if not explicitly overridden
 	switch *scenario {
@@ -126,41 +203,73 @@ func main() {
 			*rateLimitRPS = 15
 			*rateLimitBurst = 5
 		}
+		// Agents wait for an answer; they do not give up in 600ms. Without this the workload is
+		// infeasible for any scheduler (100 requests at 15 RPS need ~7s) and every mode scores ~30%.
+		if *clientTimeout == 0 {
+			*clientTimeout = 20 * time.Second
+		}
 	case "tpm":
 		if *rateLimitTPS == 0 {
 			*rateLimitTPS = 400
 			*rateLimitTokenBurst = 200
 		}
+		if *clientTimeout == 0 {
+			*clientTimeout = 20 * time.Second
+		}
 	}
 
-	fmt.Printf("================================================================================\n")
-	fmt.Printf("LLM WORKLOAD SCHEDULER EXPERIMENTAL VALIDATION BENCHMARK\n")
-	fmt.Printf("Scenario: %s, Requests: %d, Seed: %d, Concurrency: %d, Burst: %d, RPM: %.1f, TPM: %.1f\n",
+	fmt.Printf("aegis benchmark: scenario=%s requests=%d seed=%d concurrency=%d burst=%d rpm=%.0f tpm=%.0f\n\n",
 		*scenario, *requestsCount, *seed, *upstreamConc, *burstCount, *rateLimitRPS*60, *rateLimitTPS*60)
-	fmt.Printf("================================================================================\n\n")
 
-	// 1. Generate identical workload
+	// Generate identical workload
 	workload := generateWorkload(*scenario, *requestsCount, *seed, *burstCount)
+	if *clientTimeout > 0 {
+		for i := range workload {
+			workload[i].ClientTimeout = *clientTimeout
+		}
+	}
+	schedKnowsLimits := !*autoLearn
 
-	// 2. Mode A: Direct requests with independent retries and jitter
-	fmt.Printf(">>> Running Mode A: Direct Upstream Calls (with Retries & Jitter)...\n")
-	reportA := runModeA(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst)
+	// Mode A: Direct requests with independent retries and jitter
+	type modeDef struct {
+		key, title, label string
+		run               func() BenchmarkReport
+	}
+	modes := []modeDef{
+		{"A", "mode A: direct calls with retries and jitter", "A. Direct + Retries & Jitter", func() BenchmarkReport {
+			return runModeA(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst)
+		}},
+		{"B", "mode B: FIFO scheduler", "B. Bounded FIFO Scheduler", func() BenchmarkReport {
+			return runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyFIFO, "B. Bounded FIFO Scheduler", schedKnowsLimits)
+		}},
+		{"C", "mode C: priority scheduler", "C. Priority Scheduler", func() BenchmarkReport {
+			return runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyPriority, "C. Priority Scheduler", schedKnowsLimits)
+		}},
+		{"D", "mode D: fair scheduler (per-run WDRR)", "D. Fair Scheduler (WDRR)", func() BenchmarkReport {
+			return runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyFair, "D. Fair Scheduler (WDRR)", schedKnowsLimits)
+		}},
+	}
 
-	// 3. Mode B: Scheduler with FIFO Ordering
-	fmt.Printf(">>> Running Mode B: Bounded FIFO Scheduler...\n")
-	reportB := runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyFIFO, "B. Bounded FIFO Scheduler")
+	var reports []BenchmarkReport
+	ran := 0
+	for _, m := range modes {
+		if !wantMode[m.key] {
+			reports = append(reports, BenchmarkReport{Mode: m.label + " (skipped)", Classes: map[string]ClassStats{}, Runs: map[string]RunStats{}, StatusCounts: map[int]int{}})
+			continue
+		}
+		if ran > 0 && *cooldown > 0 {
+			// Every mode must start from a full provider window, or it inherits the
+			// previous mode's exhaustion and the comparison is meaningless.
+			fmt.Printf("cooling down %s so the provider's window refills\n", cooldown.Round(time.Second))
+			time.Sleep(*cooldown)
+		}
+		fmt.Printf("%s\n", m.title)
+		reports = append(reports, m.run())
+		ran++
+	}
 
-	// 4. Mode C: Scheduler with Priority Ordering
-	fmt.Printf(">>> Running Mode C: Priority-Aware Scheduler...\n")
-	reportC := runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyPriority, "C. Priority Scheduler")
-
-	// 5. Mode D: Fair Scheduler (Per-Run WDRR)
-	fmt.Printf(">>> Running Mode D: Fair Scheduler (Per-Run WDRR)...\n")
-	reportD := runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyFair, "D. Fair Scheduler (WDRR)")
-
-	// 6. Print Comparison Summary
-	reports := []BenchmarkReport{reportA, reportB, reportC, reportD}
 	printComparisonTable(reports)
+	printFailureBreakdown(reports)
 
 	if *jsonOut != "" {
 		data, err := json.MarshalIndent(reports, "", "  ")
@@ -280,6 +389,15 @@ func runModeA(workload []WorkloadRequest, upstreamConcurrency int, rateLimitRPS 
 	server := httptest.NewServer(mock)
 	defer server.Close()
 
+	var direct *upstream.Client
+	if real != nil {
+		var err error
+		direct, err = upstream.NewClient(upstream.ClientConfig{BaseURL: real.URL, APIKey: real.APIKey, ProviderType: real.ProviderType, Timeout: 60 * time.Second})
+		if err != nil {
+			panic(err)
+		}
+	}
+
 	results := make([]RequestResult, len(workload))
 	var wg sync.WaitGroup
 
@@ -305,6 +423,7 @@ func runModeA(workload []WorkloadRequest, upstreamConcurrency int, rateLimitRPS 
 
 			retries := 0
 			var lastStatusCode int
+			var lastErrBody string
 			var lastErr error
 			var lastRetryAfter time.Duration
 			success := false
@@ -343,22 +462,31 @@ func runModeA(workload []WorkloadRequest, upstreamConcurrency int, rateLimitRPS 
 					}
 				}
 
-				body := fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":"%s"}]}`, r.RequestID)
-				httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/chat/completions", bytes.NewBufferString(body))
-				if err != nil {
-					lastErr = err
-					break
+				var resp *http.Response
+				var err error
+				if real != nil {
+					resp, err = direct.Forward(ctx, real.endpointPath(), http.Header{}, []byte(real.requestBody(r.RequestID)))
+				} else {
+					body := fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":"%s"}]}`, r.RequestID)
+					var httpReq *http.Request
+					httpReq, err = http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/chat/completions", bytes.NewBufferString(body))
+					if err != nil {
+						lastErr = err
+						break
+					}
+					httpReq.Header.Set("Content-Type", "application/json")
+					httpReq.Header.Set("X-Mock-Delay", r.Duration.String())
+					resp, err = http.DefaultClient.Do(httpReq)
 				}
-				httpReq.Header.Set("Content-Type", "application/json")
-				httpReq.Header.Set("X-Mock-Delay", r.Duration.String())
-
-				resp, err := http.DefaultClient.Do(httpReq)
 				if err != nil {
 					lastErr = err
 					break
 				}
 
 				lastStatusCode = resp.StatusCode
+				if resp.StatusCode != http.StatusOK {
+					lastErrBody = readErrorBody(resp)
+				}
 				_, _ = io.Copy(io.Discard, resp.Body)
 				resp.Body.Close()
 
@@ -377,6 +505,9 @@ func runModeA(workload []WorkloadRequest, upstreamConcurrency int, rateLimitRPS 
 
 			dur := time.Since(reqStart)
 			isCanceled := lastErr == context.Canceled || (lastErr == context.DeadlineExceeded)
+			if lastErr != nil && lastErrBody == "" {
+				lastErrBody = lastErr.Error()
+			}
 
 			results[idx] = RequestResult{
 				Index:         idx,
@@ -385,6 +516,7 @@ func runModeA(workload []WorkloadRequest, upstreamConcurrency int, rateLimitRPS 
 				Priority:      r.Priority,
 				Success:       success,
 				StatusCode:    lastStatusCode,
+				StartOffsetMs: reqStart.Sub(startTime).Seconds() * 1000.0,
 				Retries:       retries,
 				QueueWaitMs:   0,
 				DurationMs:    dur.Seconds() * 1000.0,
@@ -392,6 +524,7 @@ func runModeA(workload []WorkloadRequest, upstreamConcurrency int, rateLimitRPS 
 				IsCanceled:    isCanceled,
 				IsRateLimited: lastStatusCode == http.StatusTooManyRequests,
 				IsUpstream503: lastStatusCode == http.StatusServiceUnavailable,
+				ErrorBody:     lastErrBody,
 			}
 		}(i, req)
 	}
@@ -403,7 +536,7 @@ func runModeA(workload []WorkloadRequest, upstreamConcurrency int, rateLimitRPS 
 }
 
 // runModeScheduler runs workload against the scheduler with specified policy.
-func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateLimitRPS float64, rateLimitBurst int, rateLimitTPS float64, rateLimitTokenBurst int, policy queue.SchedulingPolicy, modeName string) BenchmarkReport {
+func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateLimitRPS float64, rateLimitBurst int, rateLimitTPS float64, rateLimitTokenBurst int, policy queue.SchedulingPolicy, modeName string, knowsLimits bool) BenchmarkReport {
 	mock := upstream.NewMockUpstream(upstream.MockConfig{
 		MaxAllowedInFlight:  upstreamConcurrency,
 		RateLimitRPS:        rateLimitRPS,
@@ -414,18 +547,32 @@ func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateL
 	mockServer := httptest.NewServer(mock)
 	defer mockServer.Close()
 
+	maxClientTimeout := 2 * time.Second
+	for _, r := range workload {
+		if r.ClientTimeout > maxClientTimeout {
+			maxClientTimeout = r.ClientTimeout
+		}
+	}
+
+	upstreamURL := mockServer.URL
+	providerType := ""
+	apiKey := ""
+	if real != nil {
+		upstreamURL, providerType, apiKey = real.URL, real.ProviderType, real.APIKey
+	}
+
 	cfg := config.ServerConfig{
 		ListenAddr:        "127.0.0.1:0",
-		UpstreamURL:       mockServer.URL,
+		UpstreamURL:       upstreamURL,
+		ProviderType:      providerType,
+		UpstreamAPIKey:    apiKey,
+		UpstreamTimeout:   60 * time.Second,
 		MaxConcurrency:    upstreamConcurrency,
-		MaxQueueSize:      50,
-		MaxQueueWait:      2 * time.Second,
+		MaxQueueSize:      len(workload),
+		MaxQueueWait:      maxClientTimeout,
 		SchedulingPolicy:  string(policy),
-		RequestsPerMinute: rateLimitRPS * 60,
-		RequestBurst:      rateLimitBurst,
-		TokensPerMinute:   rateLimitTPS * 60,
-		TokenBurst:        rateLimitTokenBurst,
-		MaxPacingDelay:    2 * time.Second,
+		AutoLearnLimits:   !knowsLimits,
+		MaxPacingDelay:    0, // wait for quota up to the queue deadline
 		MaxRetries:        3,
 		InitialBackoff:    25 * time.Millisecond,
 		MaxBackoff:        250 * time.Millisecond,
@@ -434,8 +581,14 @@ func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateL
 		WeightBackground:  2,
 		WeightBatch:       1,
 	}
+	if knowsLimits {
+		cfg.RequestsPerMinute = rateLimitRPS * 60
+		cfg.RequestBurst = rateLimitBurst
+		cfg.TokensPerMinute = rateLimitTPS * 60
+		cfg.TokenBurst = rateLimitTokenBurst
+	}
 
-	client, err := upstream.NewClient(upstream.ClientConfig{BaseURL: mockServer.URL})
+	client, err := upstream.NewClient(upstream.ClientConfig{BaseURL: upstreamURL, ProviderType: providerType, APIKey: apiKey, Timeout: 60 * time.Second})
 	if err != nil {
 		panic(err)
 	}
@@ -467,7 +620,11 @@ func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateL
 			defer cancel()
 
 			body := fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":"%s"}]}`, r.RequestID)
-			httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, proxyServer.URL+"/v1/chat/completions", bytes.NewBufferString(body))
+			path := "/v1/chat/completions"
+			if real != nil {
+				body, path = real.requestBody(r.RequestID), real.endpointPath()
+			}
+			httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, proxyServer.URL+path, bytes.NewBufferString(body))
 			if err != nil {
 				return
 			}
@@ -475,7 +632,9 @@ func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateL
 			httpReq.Header.Set("X-Run-ID", r.RunID)
 			httpReq.Header.Set("X-Workload-Class", r.WorkloadClass)
 			httpReq.Header.Set("X-Priority", strconv.Itoa(r.Priority))
-			httpReq.Header.Set("X-Mock-Delay", r.Duration.String())
+			if real == nil {
+				httpReq.Header.Set("X-Mock-Delay", r.Duration.String())
+			}
 
 			resp, err := http.DefaultClient.Do(httpReq)
 			dur := time.Since(reqStart)
@@ -496,6 +655,10 @@ func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateL
 				return
 			}
 			defer resp.Body.Close()
+			var errBody string
+			if resp.StatusCode != http.StatusOK {
+				errBody = readErrorBody(resp)
+			}
 			_, _ = io.Copy(io.Discard, resp.Body)
 
 			var waitMs float64
@@ -522,6 +685,7 @@ func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateL
 				Priority:       r.Priority,
 				Success:        success,
 				StatusCode:     resp.StatusCode,
+				StartOffsetMs:  reqStart.Sub(startTime).Seconds() * 1000.0,
 				Retries:        retries,
 				QueueWaitMs:    waitMs,
 				DurationMs:     dur.Seconds() * 1000.0,
@@ -530,6 +694,7 @@ func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateL
 				IsQueueFull:    resp.StatusCode == http.StatusServiceUnavailable && schedErr == "queue_full",
 				IsUpstream503:  resp.StatusCode == http.StatusServiceUnavailable && schedErr == "",
 				IsTimeout:      resp.StatusCode == http.StatusGatewayTimeout || schedErr == "queue_timeout",
+				ErrorBody:      errBody,
 			}
 		}(i, req)
 	}
@@ -540,13 +705,40 @@ func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateL
 	return analyzeResults(modeName, results, wallClock)
 }
 
+// printTimeline shows every request in completion order: when it was sent, how long it
+// waited in the scheduler, when it finished, with what status, and how many retries.
+func printTimeline(mode string, results []RequestResult) {
+	sorted := make([]RequestResult, len(results))
+	copy(sorted, results)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].StartOffsetMs+sorted[i].DurationMs < sorted[j].StartOffsetMs+sorted[j].DurationMs
+	})
+	fmt.Printf("\n%s timeline (sent -> done, ms from mode start)\n", mode)
+	fmt.Printf("%-4s %-12s %-20s %7s %8s %8s %6s %7s %s\n", "#", "class", "run", "sent", "wait", "done", "status", "retries", "note")
+	for _, r := range sorted {
+		note := ""
+		if !r.Success && r.ErrorBody != "" {
+			note = r.ErrorBody
+			if len(note) > 60 {
+				note = note[:60] + "..."
+			}
+		}
+		fmt.Printf("%-4d %-12s %-20s %7.0f %8.0f %8.0f %6d %7d %s\n",
+			r.Index, r.WorkloadClass, r.RunID, r.StartOffsetMs, r.QueueWaitMs, r.StartOffsetMs+r.DurationMs, r.StatusCode, r.Retries, note)
+	}
+}
+
 func analyzeResults(mode string, results []RequestResult, wallClock time.Duration) BenchmarkReport {
+	if verbose {
+		printTimeline(mode, results)
+	}
 	report := BenchmarkReport{
 		Mode:                mode,
 		TotalSubmitted:      len(results),
 		WallClockDurationMs: wallClock.Seconds() * 1000.0,
 		Classes:             make(map[string]ClassStats),
 		Runs:                make(map[string]RunStats),
+		StatusCounts:        make(map[int]int),
 	}
 
 	var allLatencies []float64
@@ -574,6 +766,10 @@ func analyzeResults(mode string, results []RequestResult, wallClock time.Duratio
 			classWaitTimes[r.WorkloadClass] = append(classWaitTimes[r.WorkloadClass], r.QueueWaitMs)
 			runLatencies[r.RunID] = append(runLatencies[r.RunID], r.DurationMs)
 		} else {
+			report.StatusCounts[r.StatusCode]++
+			if report.SampleError == "" && r.ErrorBody != "" {
+				report.SampleError = fmt.Sprintf("HTTP %d: %s", r.StatusCode, r.ErrorBody)
+			}
 			if r.IsRateLimited {
 				report.HTTP429Upstream++
 			} else if r.IsScheduler429 {
@@ -687,10 +883,27 @@ func percentile(values []float64, pct float64) float64 {
 	return sorted[index]
 }
 
+// printFailureBreakdown never lets a failure disappear into a zero: every non-200 status
+// (0 = transport error) per mode, with one example body.
+func printFailureBreakdown(reports []BenchmarkReport) {
+	for _, rep := range reports {
+		if len(rep.StatusCounts) == 0 {
+			continue
+		}
+		var parts []string
+		for code, n := range rep.StatusCounts {
+			parts = append(parts, fmt.Sprintf("%d x%d", code, n))
+		}
+		sort.Strings(parts)
+		fmt.Printf("\n%s: non-200 statuses: %s\n", rep.Mode, strings.Join(parts, ", "))
+		if rep.SampleError != "" {
+			fmt.Printf("  example: %s\n", rep.SampleError)
+		}
+	}
+}
+
 func printComparisonTable(reports []BenchmarkReport) {
-	fmt.Printf("\n====================================================================================================\n")
-	fmt.Printf("BENCHMARK RESULTS SUMMARY\n")
-	fmt.Printf("====================================================================================================\n\n")
+	fmt.Printf("results\n\n")
 
 	fmt.Printf("%-32s | %-12s | %-12s | %-12s | %-12s\n", "Metric", "Mode A (Dir)", "Mode B (FIFO)", "Mode C (Prio)", "Mode D (Fair)")
 	fmt.Println(strings.Repeat("-", 95))
@@ -711,6 +924,8 @@ func printComparisonTable(reports []BenchmarkReport) {
 		reports[0].HTTP504Timeout, reports[1].HTTP504Timeout, reports[2].HTTP504Timeout, reports[3].HTTP504Timeout)
 	fmt.Printf("%-32s | %-12d | %-12d | %-12d | %-12d\n", "Client Canceled / Deadline",
 		reports[0].CanceledCount, reports[1].CanceledCount, reports[2].CanceledCount, reports[3].CanceledCount)
+	fmt.Printf("%-32s | %-12d | %-12d | %-12d | %-12d\n", "Other Failures (unclassified)",
+		reports[0].OtherFailures, reports[1].OtherFailures, reports[2].OtherFailures, reports[3].OtherFailures)
 	fmt.Printf("%-32s | %-12d | %-12d | %-12d | %-12d\n", "Retries Issued",
 		reports[0].TotalRetries, reports[1].TotalRetries, reports[2].TotalRetries, reports[3].TotalRetries)
 	fmt.Printf("%-32s | %-11.1f  | %-11.1f  | %-11.1f  | %-11.1f\n", "Throughput (req/s)",
@@ -774,5 +989,4 @@ func printComparisonTable(reports []BenchmarkReport) {
 		fmt.Printf("  Mode D: %2d/%2d (%5.1f%%) -> %5.1f%% share | p50: %5.1fms\n",
 			reports[3].Runs[r].Completed, reports[3].Runs[r].TotalRequests, reports[3].Runs[r].SuccessRate, reports[3].Runs[r].ServiceShare, reports[3].Runs[r].P50LatencyMs)
 	}
-	fmt.Printf("\n====================================================================================================\n")
 }

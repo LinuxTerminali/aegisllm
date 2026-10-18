@@ -43,9 +43,15 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		if timeout <= 0 {
 			timeout = 60 * time.Second
 		}
-		httpClient = &http.Client{
-			Timeout: timeout,
-		}
+		// No http.Client.Timeout: it would cap the whole response, cutting off any stream
+		// longer than it. Instead bound connect + time-to-first-byte here, and let the
+		// request context bound the rest (the proxy cancels when the client goes away).
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.ResponseHeaderTimeout = timeout
+		transport.MaxIdleConns = 256
+		transport.MaxIdleConnsPerHost = 128
+		transport.IdleConnTimeout = 90 * time.Second
+		httpClient = &http.Client{Transport: transport}
 	}
 
 	prov := cfg.Provider

@@ -1,232 +1,148 @@
-# AegisLLM 🛡️
+# AegisLLM
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/LinuxTerminali/aegisllm)](https://goreportcard.com/report/github.com/LinuxTerminali/aegisllm)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/LinuxTerminali/aegisllm)](go.mod)
+**One quota, many agents, no 429s.**
 
-A high-performance, single-binary HTTP proxy written in Go that shields LLM providers from multi-agent workloads using bounded queues, priority scheduling, hierarchical Weighted Deficit Round-Robin (WDRR) fairness across runs, RPM/TPM capacity pacing, token estimation, coordinated retries, and provider adapters.
+When a fleet of AI agents shares one provider account, they all hit the rate limit at the same moment, retry together, and fail again. Work already done is wasted; customer-facing runs die. AegisLLM is a small proxy that sits between your agents and OpenAI or Anthropic, holds one view of the account's remaining quota, and lets requests through at the rate the provider actually allows – queued by priority, fair across runs, retried centrally. Agents never see a rate-limit error the scheduler could have avoided.
 
----
+- Single Go binary, runs on your own machine or cluster. Prompts never leave your network except to the provider you already use.
+- Setup is one URL change in your agent's config.
+- Limits are learned from the provider's response headers. You don't need to know your RPM/TPM.
+- Streaming supported.
 
-## Architecture Overview
-
-```
- [AI Agents / Callers]
-      │  POST /v1/chat/completions (X-Run-ID, X-Workload-Class, X-Priority)
-      ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                                AegisLLM                                │
-│                                                                        │
-│  ┌──────────────────────┐    ┌──────────────────┐    ┌───────────────┐ │
-│  │  Admission Control   │───▶│ Fair Queue (WDRR)│───▶│ Concurrency & │ │
-│  │ (Cap: MaxQueueSize)  │    │or Priority Heap  │    │ RPM/TPM Pacer │ │
-│  └──────────────────────┘    └──────────────────┘    └───────────────┘ │
-│                                                              │         │
-│  ┌──────────────────────┐    ┌──────────────────┐            │         │
-│  │  Bounded Observability│◀───│ Coordinated Retry│◀───────────┘         │
-│  │  (/status, /metrics) │    │ & Reconciliation │                      │
-│  └──────────────────────┘    └──────────────────┘                      │
-└───────────────────────────────────────┬────────────────────────────────┘
-                                        │
-                                        ▼
-                         ┌─────────────────────────────┐
-                         │    Upstream LLM Provider    │
-                         │ (OpenAI, Anthropic, Azure,  │
-                         │  vLLM, Ollama, Mock Server) │
-                         └─────────────────────────────┘
-```
-
----
-
-## Core Scheduling Semantics
-
-1. **Priority Ordering**:
-   Higher integer value indicates higher scheduling precedence. Default mapping from `X-Workload-Class`:
-   - `production`: Priority **100** (Weight: 8x)
-   - `interactive`: Priority **75** (Weight: 4x, default if unspecified)
-   - `background`: Priority **50** (Weight: 2x)
-   - `batch`: Priority **25** (Weight: 1x)
-   Explicit `X-Priority` headers override class defaults.
-
-2. **Hierarchical WDRR Fairness Across Runs**:
-   When configured with `-scheduling-policy fair` (default), requests are scheduled by priority class weights. Within each priority class, distinct `X-Run-ID` values receive fair Deficit Round-Robin service, preventing high-volume agent runs from starving concurrent runs.
-
-3. **RPM and TPM Capacity Pacing**:
-   Dual token-bucket rate limiter tracks both Requests Per Minute (RPM) and Tokens Per Minute (TPM). Incoming requests reserve estimated tokens (via prompt heuristic estimation). When quota is depleted, requests are paced up to `-max-pacing-delay`. If deadline cannot be met, request is rejected with HTTP 429 (`rate_limit_exceeded`).
-
-4. **Coordinated Retries & Token Reconciliation**:
-   Transient errors (HTTP 429, 502, 503, 504) are retried with exponential backoff and full random jitter, honoring upstream `Retry-After` headers. Non-retryable client errors (400, 401, 403, 404) fail fast without retry. On successful response, provider token usage (`usage.total_tokens`) reconciles initial reservations.
-
-5. **Security & Credential Safety**:
-   - Prompts, completion messages, and API keys are **never logged**.
-   - Upstream error messages are scrubbed to prevent leaking secret keys (`sk-...`, `Bearer ...`).
-   - Hop-by-hop and internal headers (`X-Run-ID`, `X-Priority`, `X-Scheduler-*`) are stripped before forwarding.
-
----
-
-## Provider Compatibility Layer
-
-The proxy provides explicit provider adapters via `-provider-type`:
-
-| Provider Type | Identifier | Default Auth Header | Quota Headers Parsed |
-| :--- | :--- | :--- | :--- |
-| **OpenAI** (default) | `openai` | `Authorization: Bearer <key>` | `x-ratelimit-remaining-*`, `x-ratelimit-reset-*` |
-| **Anthropic** | `anthropic` | `x-api-key: <key>`, `anthropic-version` | `anthropic-ratelimit-*` |
-| **Azure OpenAI** | `azure` | `api-key: <key>` | `x-ratelimit-*`, Azure standards |
-| **Generic / Local** | `generic` | Configurable (`-auth-header-name`) | Standard IETF `RateLimit-*` & OpenAI-style |
-
-### Defensive Quota Handling & Shared-Key Limits
-- Quota headers are treated as **advisory signals**, not authoritative truth.
-- Contradictory, malformed, or absurd quota headers are safely ignored without corrupting capacity tracking.
-- **Shared-Key Notice**: In multi-replica deployments or shared accounts, upstream rate limits apply globally to the API key or organization, not exclusively to this proxy instance. Downward synchronization hints adjust local buckets when upstream reports lower remaining quota.
-
----
-
-## Operational Observability
-
-### 1. Health Liveness (`GET /healthz`)
-```bash
-curl -s http://127.0.0.1:8080/healthz
-# {"status":"ok"}
-```
-
-### 2. Operational Status (`GET /status`)
-Returns JSON runtime snapshot of queues, active concurrency, token buckets, and latency:
-```bash
-curl -s http://127.0.0.1:8080/status | jq .
-```
-Example fields:
-- `queued_requests`, `active_requests`, `max_concurrency`, `max_queue_capacity`
-- `total_requests`, `total_admitted`, `total_completed`, `total_rejected`
-- `metrics.queue_wait_by_class`: breakdown of wait times by priority class
-- `metrics.rejections_by_reason`: `queue_full`, `capacity_exceeded`, `queue_timeout`
-- `capacity`: available request tokens and token tokens
-
-### 3. Prometheus Metrics (`GET /metrics`)
-Exposes standard Prometheus exposition format with **strictly bounded cardinality** (no run IDs, prompt texts, user IDs, or API keys):
-- `scheduler_requests_total{status="accepted|completed|failed|canceled|rejected"}`
-- `scheduler_rejections_total{reason="queue_full|capacity_exceeded|queue_timeout"}`
-- `scheduler_retries_total`
-- `upstream_responses_total{status_class="2xx|4xx|5xx", code="429|502|503|504"}`
-- `scheduler_active_concurrency`, `scheduler_max_concurrency`
-- `scheduler_queued_requests`, `scheduler_max_queue_size`
-- `scheduler_capacity_requests_available`, `scheduler_capacity_tokens_available`
-- `scheduler_queue_wait_ms_total{priority="production|interactive|background|batch"}`
-
----
-
-## Configuration Reference
-
-| Flag | Environment Variable | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `-listen-addr` | `SCHEDULER_LISTEN_ADDR` | `:8080` | Proxy listen address |
-| `-upstream-url` | `SCHEDULER_UPSTREAM_URL` | `http://127.0.0.1:8081` | Upstream provider base URL |
-| `-upstream-api-key` | `SCHEDULER_UPSTREAM_API_KEY` | `""` | Upstream provider secret key |
-| `-provider-type` | `SCHEDULER_PROVIDER_TYPE` | `openai` | Adapter: `openai`, `anthropic`, `azure`, `generic` |
-| `-auth-header-name`| `SCHEDULER_AUTH_HEADER_NAME` | `""` | Custom auth header name (generic adapter) |
-| `-default-model` | `SCHEDULER_DEFAULT_MODEL` | `""` | Fallback model if omitted in request |
-| `-upstream-timeout`| `SCHEDULER_UPSTREAM_TIMEOUT` | `60s` | Upstream HTTP request timeout |
-| `-max-concurrency` | `SCHEDULER_MAX_CONCURRENCY` | `5` | In-flight execution concurrency limit |
-| `-max-queue-size` | `SCHEDULER_MAX_QUEUE_SIZE` | `100` | Max queued requests before rejection (503) |
-| `-max-queue-wait` | `SCHEDULER_MAX_QUEUE_WAIT` | `30s` | Max queue wait deadline before timeout (504) |
-| `-scheduling-policy`| `SCHEDULER_SCHEDULING_POLICY`| `fair` | Queue policy: `fair` (WDRR), `priority`, `fifo` |
-| `-rpm` | `SCHEDULER_RPM` | `0` | Max requests per minute quota (0 = unconstrained) |
-| `-request-burst` | `SCHEDULER_REQUEST_BURST` | `0` | RPM token bucket burst allowance |
-| `-tpm` | `SCHEDULER_TPM` | `0` | Max tokens per minute quota (0 = unconstrained) |
-| `-token-burst` | `SCHEDULER_TOKEN_BURST` | `0` | TPM token bucket burst allowance |
-| `-max-pacing-delay`| `SCHEDULER_MAX_PACING_DELAY` | `500ms` | Max sleep pacing delay before 429 rejection |
-| `-max-retries` | `SCHEDULER_MAX_RETRIES` | `3` | Coordinated retries on transient errors |
-| `-initial-backoff` | `SCHEDULER_INITIAL_BACKOFF` | `50ms` | Base retry backoff |
-| `-max-backoff` | `SCHEDULER_MAX_BACKOFF` | `2s` | Max retry backoff ceiling |
-| `-run-mock` | `SCHEDULER_RUN_MOCK` | `false` | Run embedded mock upstream |
-| `-mock-addr` | `SCHEDULER_MOCK_ADDR` | `:8081` | Address for embedded mock provider |
-| `-mock-latency` | `SCHEDULER_MOCK_LATENCY` | `30ms` | Mock provider inference latency |
-
----
-
-## Quickstart & Local Execution
-
-### 1. Build Binaries
-```bash
-go build -o bin/aegis ./cmd/aegis
-go build -o bin/mockupstream ./cmd/mockupstream
-go build -o bin/benchmark ./cmd/benchmark
-```
-
-### 2. Run with Embedded Mock Upstream
-```bash
-./bin/aegis -run-mock -listen-addr :8080 -mock-addr :8081 -max-concurrency 5 -max-queue-size 100 -rpm 300 -request-burst 30
-```
-
-### 3. Run with Real OpenAI Provider
-```bash
-export OPENAI_API_KEY="sk-..."
-./bin/aegis \
-  -listen-addr :8080 \
-  -upstream-url https://api.openai.com/v1 \
-  -upstream-api-key "$OPENAI_API_KEY" \
-  -provider-type openai \
-  -max-concurrency 10 \
-  -max-queue-size 200 \
-  -rpm 500 \
-  -tpm 200000
-```
-
-### 4. Running via Docker
-```bash
-docker build -t aegisllm .
-docker run -p 8080:8080 aegisllm -run-mock -mock-addr :8081
-```
-
----
-
-## Real Provider Smoke Test
-
-An opt-in integration test validates live communication with a real LLM provider. It sends minimal tokens (`max_tokens: 3`) to verify:
-- Successful completion and usage token reporting
-- Error propagation and secret redaction
-- Cancellation propagation
-
-To execute against OpenAI:
-```bash
-OPENAI_API_KEY="sk-..." go test -v -run TestRealProvider_Smoke ./internal/upstream
-```
-If `OPENAI_API_KEY` (or `PROVIDER_TEST_API_KEY`) is not set, the test skips cleanly in 0.00s.
-
----
-
-## Running Benchmarks
-
-Run the deterministic benchmark harness across supported scenarios:
+## 60-second start
 
 ```bash
-# Mixed priority competition
-go run ./cmd/benchmark -scenario mixed-priorities -requests 100 -burst 40
+go install github.com/LinuxTerminali/aegisllm/cmd/aegis@latest   # or: docker build -t aegisllm .
 
-# Competing agent runs with heavy vs light workloads
-go run ./cmd/benchmark -scenario competing-runs -requests 100 -burst 40
+# Anthropic
+aegis -provider-type anthropic -upstream-url https://api.anthropic.com -upstream-api-key "$ANTHROPIC_API_KEY"
 
-# Client deadline cancellation under queue load
-go run ./cmd/benchmark -scenario cancellation -requests 100 -burst 40
-
-# Token bucket RPM rate-limit enforcement
-go run ./cmd/benchmark -scenario rpm -requests 100 -burst 20
-
-# Token bucket TPM rate-limit enforcement
-go run ./cmd/benchmark -scenario tpm -requests 100 -burst 20
-
-# Mixed prompt lengths (short vs long tokens)
-go run ./cmd/benchmark -scenario token-mix -requests 100 -burst 20
+# OpenAI
+aegis -provider-type openai -upstream-url https://api.openai.com -upstream-api-key "$OPENAI_API_KEY"
 ```
 
----
+Then point your agents at `http://localhost:8080` instead of the provider. Per tool:
 
-## Production Limitations & Deployment Notice
+| Tool | Guide |
+|---|---|
+| Claude Code (many parallel sessions) | [docs/claude-code.md](docs/claude-code.md) |
+| OpenAI SDK and OpenAI Agents SDK | [docs/openai-sdk.md](docs/openai-sdk.md) |
+| Anthropic SDK | [docs/anthropic-sdk.md](docs/anthropic-sdk.md) |
+| LangChain / LangGraph / CrewAI | [docs/langchain-langgraph.md](docs/langchain-langgraph.md) |
+| Behind or in front of LiteLLM | [docs/litellm.md](docs/litellm.md) |
 
-1. **Single-Instance In-Memory State**:
-   - Queues, rate-limit token buckets, and WDRR run deficit counters reside strictly in memory.
-   - All queue state and fairness histories are lost upon restart.
-2. **Multi-Replica Isolation**:
-   - Multiple scheduler replicas do **not** coordinate rate limits or queues across instances. If deploying behind a load balancer, each replica operates independently. Upstream quota is shared across replicas only via downward response header synchronization.
-3. **Streaming Unsupported**:
-   - Streaming completions (`"stream": true` SSE) cannot be safely replayed on retry once initial chunks have been delivered to the client, and streaming token reconciliation is not yet supported. The proxy currently coordinates unary requests.
+Watch it work: `curl localhost:8080/status | jq .` shows queue depth, who is waiting, quota left, and the limits it learned.
+
+Try it with no API key: `aegis -run-mock` starts an embedded fake provider with a tiny rate limit; fire 50 requests at it and watch them all complete.
+
+## What it does with a request
+
+1. Reads two optional headers: `X-Run-ID` (which task this belongs to) and `X-Workload-Class` (`production`, `interactive`, `background`, `batch`) or an explicit `X-Priority`.
+2. Estimates the request's token cost from the prompt and `max_tokens`.
+3. If quota and a concurrency slot are free, forwards immediately. Otherwise queues it: higher classes first; within a class, fair round-robin across run IDs so one run with 40 subagents can't starve a run with 2.
+4. A single dispatcher admits from the head of that queue, waiting for quota only for the head. A production request arriving mid-burst therefore waits for at most one pacing interval, not behind every batch request already in line.
+5. Forwards to the provider with the proxy's API key. Retries 429/502/503/504 centrally with backoff and `Retry-After`. An upstream 429 drains the shared bucket so nothing else piles on.
+6. On the response, reads the provider's rate-limit headers to correct its view of the quota, and reconciles the token estimate with real usage.
+
+Streams are relayed event by event. A stream that has started is never re-issued.
+
+## Results
+
+### Against a real provider
+
+Groq, free tier, `openai/gpt-oss-120b`, limit 30 requests per minute. 100 requests sent at once; the same workload run directly and then through the scheduler, with a 65 s pause between so the provider's window was full for both.
+
+| | Direct calls with retries | Through AegisLLM |
+|---|---|---|
+| Completed | 35 / 100 | 100 / 100 |
+| Failed after retries | 65 | 0 |
+| Retries | 205, performed by the clients | 30, performed by the proxy; clients saw none |
+| Wall clock | 7.6 s, then gave up | 201 s, everything finished |
+| `production` (49 requests) | 16 completed, p50 1.0 s | 49 completed, p50 16.6 s |
+| `interactive` (24) | 11 completed | 24 completed, p50 96 s |
+| `background` (15) | 5 completed | 15 completed, p50 146 s |
+| `batch` (12) | 3 completed | 12 completed, p50 182 s |
+
+At 30 per minute, 100 requests take at least 140 s after the first 30. The scheduler used that time to finish all of them in priority order. Direct calls spent 205 retries failing within 8 s because the retry budget ran out long before the window refilled.
+
+Same setup with 40 requests, a small overflow: both finished 40/40. Direct took 7.7 s with 10 client-side retries; the scheduler took 31 s with none, and delivered all 25 `production` requests before any other class. For small overflows the scheduler's value is ordering and the absence of retry logic in every client; for large or sustained ones it is completion.
+
+Reproduce: see [Development](#development) for the exact command. Groq reports its real per-minute limit only in 429 text, so `-rpm` is set by hand there; OpenAI and Anthropic limits are learned from headers.
+
+### Against the embedded mock (reproducible offline)
+
+100 requests, mock provider limited to 15 requests/second with burst 5, scheduler **not** told the limit, clients waiting up to 20 s.
+
+| Mode | Success | Upstream 429s | Retries | Wall clock |
+|---|---|---|---|---|
+| Direct calls with retries and jitter | 57% | 43 | 213 | 3.8 s |
+| Through AegisLLM | 100% | 0 | 1 | 7.3 s |
+
+`go run ./cmd/benchmark -scenario rpm` reproduces this.
+
+## Why not LiteLLM?
+
+LiteLLM solves "one app, many providers": routing, failover, virtual keys, spend. AegisLLM solves "many agents, one quota": learning the provider's limits, queuing by priority, fairness across runs, pacing so the limit is never hit, and holding the whole queue when the provider says `Retry-After`. LiteLLM counts and rejects; it does not queue, and its shared counters are per instance. The two stack: see [docs/litellm.md](docs/litellm.md).
+
+## Configuration
+
+Most deployments need only the first three.
+
+| Flag | Env | Default | Purpose |
+|---|---|---|---|
+| `-provider-type` | `SCHEDULER_PROVIDER_TYPE` | `openai` | `openai`, `anthropic`, `azure`, `generic` |
+| `-upstream-url` | `SCHEDULER_UPSTREAM_URL` | `http://127.0.0.1:8081` | Provider base URL (`/v1` suffix optional) or a full Azure deployment URL |
+| `-upstream-api-key` | `SCHEDULER_UPSTREAM_API_KEY` | | Provider key. When set, it replaces whatever key the client sends |
+| `-listen-addr` | `SCHEDULER_LISTEN_ADDR` | `:8080` | Where agents connect |
+| `-max-concurrency` | `SCHEDULER_MAX_CONCURRENCY` | `32` | In-flight requests to the provider |
+| `-max-queue-size` | `SCHEDULER_MAX_QUEUE_SIZE` | `100` | Queued requests before new ones get 503 |
+| `-max-queue-wait` | `SCHEDULER_MAX_QUEUE_WAIT` | `30s` | Longest a request waits for a slot and quota before 504 |
+| `-rpm`, `-tpm` | `SCHEDULER_RPM`, `SCHEDULER_TPM` | learned | Override the limits learned from headers (required for Azure, which sends none). Burst defaults to the full minute; `-request-burst`/`-token-burst` to lower it |
+| `-scheduling-policy` | `SCHEDULER_SCHEDULING_POLICY` | `fair` | `fair`, `priority`, `fifo` |
+| `-max-pacing-delay` | `SCHEDULER_MAX_PACING_DELAY` | `0` | Set positive to reject with 429 instead of waiting when quota is short |
+
+`aegis -help` lists the rest (retry backoff, burst sizes, class weights, mock provider).
+
+## Operations
+
+- `GET /healthz` liveness.
+- `GET /status` JSON snapshot: queue, active, rejections by reason, wait by class, capacity, learned limits.
+- `GET /metrics` Prometheus, bounded cardinality (no run IDs or prompts).
+- Logs carry request ID, run ID, class, wait and upstream time. Never prompts, responses, or keys.
+
+## Limits of this version
+
+- **No authentication on the listener.** Anyone who can reach the port spends your provider key. Bind to localhost or a private network until client keys land (next milestone).
+- **One instance.** Queue and quota state are in memory. Two instances behind a load balancer do not share a count; each sees the provider's `remaining` headers and backs off, but they will over-admit together. Multi-instance coordination is the next milestone.
+- **Streams aren't retried after the first byte.** If the provider drops mid-stream, the client gets the truncated stream.
+- **Token estimate is a heuristic** (≈4 chars/token plus `max_tokens`), corrected after each response. Good enough to pace; not exact.
+- **Azure** needs `-rpm`/`-tpm` set by hand; its headers carry no limits.
+
+## How this was built
+
+With heavy AI assistance, and every line reviewed. The concurrency paths run under the race detector in CI, the benchmark is reproducible from the repo, and the bugs found so far are recorded in the commit history rather than hidden. Judge the code, not the tooling.
+
+## Development
+
+```bash
+go test -race ./...
+go run ./cmd/benchmark -scenario rpm      # rate-limit scenario
+go run ./cmd/benchmark -scenario competing-runs
+```
+
+Against a real provider. Modes run one after another on the same account, so the harness pauses 65s between them (`-cooldown`) to let the provider's minute window refill; without that, each mode inherits the previous one's exhaustion. Use `-modes A,C` to compare just the baseline and the priority scheduler, and `-verbose` for a per-request timeline:
+
+```bash
+# Groq free tier (the run in Results): 30 RPM / 8000 TPM set by hand, baseline and priority modes only
+BENCH_API_KEY=$GROQ_API_KEY go run ./cmd/benchmark -scenario rpm -requests 100 -burst 100 -upstream-concurrency 16 \
+  -provider-type generic -upstream-url https://api.groq.com/openai/v1 -model openai/gpt-oss-120b \
+  -auto-learn=false -rate-limit-rps 0.5 -rate-limit-tps 133 -client-timeout 240s -modes A,C
+
+# OpenAI / Anthropic: limits are learned from headers
+BENCH_API_KEY=$OPENAI_API_KEY    go run ./cmd/benchmark -scenario rpm -requests 50 -provider-type openai    -upstream-url https://api.openai.com    -model gpt-4o-mini
+BENCH_API_KEY=$ANTHROPIC_API_KEY go run ./cmd/benchmark -scenario rpm -requests 50 -provider-type anthropic -upstream-url https://api.anthropic.com -model claude-3-5-haiku-latest
+```
+
+Provider smoke test against a real key: `OPENAI_API_KEY=sk-... go test -run TestRealProvider_Smoke ./internal/upstream`.
+
+Apache 2.0. Contributions: see [CONTRIBUTING.md](CONTRIBUTING.md).

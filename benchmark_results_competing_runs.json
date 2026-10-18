@@ -2,31 +2,31 @@
   {
     "mode": "A. Direct + Retries \u0026 Jitter",
     "total_submitted": 100,
-    "successful": 44,
-    "success_rate_pct": 44,
-    "http_429_upstream": 56,
+    "successful": 45,
+    "success_rate_pct": 45,
+    "http_429_upstream": 55,
     "http_429_scheduler": 0,
     "http_503_queue_full": 0,
     "http_503_upstream": 0,
     "http_504_timeout": 0,
     "canceled_count": 0,
     "other_failures": 0,
-    "total_retries": 56,
-    "throughput_rps": 30.630840418020473,
-    "wall_clock_duration_ms": 1436.46075,
-    "p50_latency_ms": 28.164667,
-    "p95_latency_ms": 110.66325,
+    "total_retries": 55,
+    "throughput_rps": 31.331988634007804,
+    "wall_clock_duration_ms": 1436.23185,
+    "p50_latency_ms": 28.516519,
+    "p95_latency_ms": 105.620806,
     "p50_wait_ms": 0,
     "p95_wait_ms": 0,
-    "jains_fairness_index": 0.7700875099443119,
+    "jains_fairness_index": 0.6965944272445821,
     "classes": {
       "production": {
         "total_requests": 100,
-        "completed": 44,
-        "failed": 56,
-        "success_rate_pct": 44,
-        "p50_latency_ms": 28.164667,
-        "p95_latency_ms": 110.66325,
+        "completed": 45,
+        "failed": 55,
+        "success_rate_pct": 45,
+        "p50_latency_ms": 28.516519,
+        "p95_latency_ms": 105.620806,
         "p50_wait_ms": 0,
         "p95_wait_ms": 0
       }
@@ -34,154 +34,154 @@
     "runs": {
       "run-prod-heavy": {
         "total_requests": 66,
-        "completed": 26,
-        "failed": 40,
-        "success_rate_pct": 39.39393939393939,
-        "service_share_pct": 59.09090909090909,
-        "p50_latency_ms": 28.103917,
-        "p95_latency_ms": 110.66325
+        "completed": 29,
+        "failed": 37,
+        "success_rate_pct": 43.93939393939394,
+        "service_share_pct": 64.44444444444444,
+        "p50_latency_ms": 28.516519,
+        "p95_latency_ms": 109.863393
       },
       "run-prod-light-1": {
         "total_requests": 15,
-        "completed": 9,
-        "failed": 6,
-        "success_rate_pct": 60,
-        "service_share_pct": 20.454545454545457,
-        "p50_latency_ms": 29.710125,
-        "p95_latency_ms": 97.88870800000001
+        "completed": 8,
+        "failed": 7,
+        "success_rate_pct": 53.333333333333336,
+        "service_share_pct": 17.77777777777778,
+        "p50_latency_ms": 29.505828,
+        "p95_latency_ms": 97.007216
       },
       "run-prod-light-2": {
         "total_requests": 19,
-        "completed": 9,
-        "failed": 10,
-        "success_rate_pct": 47.368421052631575,
-        "service_share_pct": 20.454545454545457,
-        "p50_latency_ms": 29.305125,
-        "p95_latency_ms": 113.84049999999999
+        "completed": 8,
+        "failed": 11,
+        "success_rate_pct": 42.10526315789473,
+        "service_share_pct": 17.77777777777778,
+        "p50_latency_ms": 26.987803,
+        "p95_latency_ms": 95.095057
       }
     }
   },
   {
     "mode": "B. Bounded FIFO Scheduler",
     "total_submitted": 100,
-    "successful": 96,
-    "success_rate_pct": 96,
+    "successful": 100,
+    "success_rate_pct": 100,
     "http_429_upstream": 0,
     "http_429_scheduler": 0,
-    "http_503_queue_full": 4,
+    "http_503_queue_full": 0,
     "http_503_upstream": 0,
     "http_504_timeout": 0,
     "canceled_count": 0,
     "other_failures": 0,
     "total_retries": 0,
-    "throughput_rps": 69.18214009005028,
-    "wall_clock_duration_ms": 1387.6413750000002,
-    "p50_latency_ms": 580.923875,
-    "p95_latency_ms": 693.268333,
-    "p50_wait_ms": 523,
-    "p95_wait_ms": 627,
-    "jains_fairness_index": 0.6934537246049661,
+    "throughput_rps": 67.90098964232533,
+    "wall_clock_duration_ms": 1472.732585,
+    "p50_latency_ms": 600.419728,
+    "p95_latency_ms": 713.234563,
+    "p50_wait_ms": 532,
+    "p95_wait_ms": 643,
+    "jains_fairness_index": 0.6744907594765952,
     "classes": {
       "production": {
         "total_requests": 100,
-        "completed": 96,
-        "failed": 4,
-        "success_rate_pct": 96,
-        "p50_latency_ms": 580.923875,
-        "p95_latency_ms": 693.268333,
-        "p50_wait_ms": 523,
-        "p95_wait_ms": 627
+        "completed": 100,
+        "failed": 0,
+        "success_rate_pct": 100,
+        "p50_latency_ms": 600.419728,
+        "p95_latency_ms": 713.234563,
+        "p50_wait_ms": 532,
+        "p95_wait_ms": 643
       }
     },
     "runs": {
       "run-prod-heavy": {
         "total_requests": 66,
-        "completed": 62,
-        "failed": 4,
-        "success_rate_pct": 93.93939393939394,
-        "service_share_pct": 64.58333333333334,
-        "p50_latency_ms": 549.5018339999999,
-        "p95_latency_ms": 681.7664169999999
+        "completed": 66,
+        "failed": 0,
+        "success_rate_pct": 100,
+        "service_share_pct": 66,
+        "p50_latency_ms": 557.797433,
+        "p95_latency_ms": 715.148118
       },
       "run-prod-light-1": {
         "total_requests": 15,
         "completed": 15,
         "failed": 0,
         "success_rate_pct": 100,
-        "service_share_pct": 15.625,
-        "p50_latency_ms": 608.542542,
-        "p95_latency_ms": 711.185917
+        "service_share_pct": 15,
+        "p50_latency_ms": 644.932522,
+        "p95_latency_ms": 743.4692779999999
       },
       "run-prod-light-2": {
         "total_requests": 19,
         "completed": 19,
         "failed": 0,
         "success_rate_pct": 100,
-        "service_share_pct": 19.791666666666664,
-        "p50_latency_ms": 600.431791,
-        "p95_latency_ms": 681.898125
+        "service_share_pct": 19,
+        "p50_latency_ms": 605.1732800000001,
+        "p95_latency_ms": 704.777659
       }
     }
   },
   {
     "mode": "C. Priority Scheduler",
     "total_submitted": 100,
-    "successful": 96,
-    "success_rate_pct": 96,
+    "successful": 100,
+    "success_rate_pct": 100,
     "http_429_upstream": 0,
     "http_429_scheduler": 0,
-    "http_503_queue_full": 4,
+    "http_503_queue_full": 0,
     "http_503_upstream": 0,
     "http_504_timeout": 0,
     "canceled_count": 0,
     "other_failures": 0,
     "total_retries": 0,
-    "throughput_rps": 69.03968406433744,
-    "wall_clock_duration_ms": 1390.504625,
-    "p50_latency_ms": 580.2305829999999,
-    "p95_latency_ms": 690.324375,
-    "p50_wait_ms": 523,
-    "p95_wait_ms": 630,
-    "jains_fairness_index": 0.6934537246049661,
+    "throughput_rps": 68.81896914503928,
+    "wall_clock_duration_ms": 1453.087735,
+    "p50_latency_ms": 593.670711,
+    "p95_latency_ms": 714.8670529999999,
+    "p50_wait_ms": 532,
+    "p95_wait_ms": 639,
+    "jains_fairness_index": 0.6744907594765952,
     "classes": {
       "production": {
         "total_requests": 100,
-        "completed": 96,
-        "failed": 4,
-        "success_rate_pct": 96,
-        "p50_latency_ms": 580.2305829999999,
-        "p95_latency_ms": 690.324375,
-        "p50_wait_ms": 523,
-        "p95_wait_ms": 630
+        "completed": 100,
+        "failed": 0,
+        "success_rate_pct": 100,
+        "p50_latency_ms": 593.670711,
+        "p95_latency_ms": 714.8670529999999,
+        "p50_wait_ms": 532,
+        "p95_wait_ms": 639
       }
     },
     "runs": {
       "run-prod-heavy": {
         "total_requests": 66,
-        "completed": 62,
-        "failed": 4,
-        "success_rate_pct": 93.93939393939394,
-        "service_share_pct": 64.58333333333334,
-        "p50_latency_ms": 549.4734169999999,
-        "p95_latency_ms": 688.094625
+        "completed": 66,
+        "failed": 0,
+        "success_rate_pct": 100,
+        "service_share_pct": 66,
+        "p50_latency_ms": 560.7412109999999,
+        "p95_latency_ms": 717.830183
       },
       "run-prod-light-1": {
         "total_requests": 15,
         "completed": 15,
         "failed": 0,
         "success_rate_pct": 100,
-        "service_share_pct": 15.625,
-        "p50_latency_ms": 607.905417,
-        "p95_latency_ms": 716.481125
+        "service_share_pct": 15,
+        "p50_latency_ms": 639.9977230000001,
+        "p95_latency_ms": 723.759329
       },
       "run-prod-light-2": {
         "total_requests": 19,
         "completed": 19,
         "failed": 0,
         "success_rate_pct": 100,
-        "service_share_pct": 19.791666666666664,
-        "p50_latency_ms": 594.0832499999999,
-        "p95_latency_ms": 678.21275
+        "service_share_pct": 19,
+        "p50_latency_ms": 600.850606,
+        "p95_latency_ms": 686.373195
       }
     }
   },
@@ -192,40 +192,40 @@
     "success_rate_pct": 93,
     "http_429_upstream": 0,
     "http_429_scheduler": 0,
-    "http_503_queue_full": 1,
+    "http_503_queue_full": 0,
     "http_503_upstream": 0,
-    "http_504_timeout": 6,
+    "http_504_timeout": 7,
     "canceled_count": 0,
     "other_failures": 0,
     "total_retries": 0,
-    "throughput_rps": 67.50056070647213,
-    "wall_clock_duration_ms": 1377.766333,
-    "p50_latency_ms": 519.7775409999999,
-    "p95_latency_ms": 744.993583,
-    "p50_wait_ms": 426,
-    "p95_wait_ms": 708,
-    "jains_fairness_index": 0.6948662328271873,
+    "throughput_rps": 67.57228157370604,
+    "wall_clock_duration_ms": 1376.303979,
+    "p50_latency_ms": 457.31861499999997,
+    "p95_latency_ms": 745.1096699999999,
+    "p50_wait_ms": 427,
+    "p95_wait_ms": 699,
+    "jains_fairness_index": 0.7088763216129825,
     "classes": {
       "production": {
         "total_requests": 100,
         "completed": 93,
         "failed": 7,
         "success_rate_pct": 93,
-        "p50_latency_ms": 519.7775409999999,
-        "p95_latency_ms": 744.993583,
-        "p50_wait_ms": 426,
-        "p95_wait_ms": 708
+        "p50_latency_ms": 457.31861499999997,
+        "p95_latency_ms": 745.1096699999999,
+        "p50_wait_ms": 427,
+        "p95_wait_ms": 699
       }
     },
     "runs": {
       "run-prod-heavy": {
         "total_requests": 66,
-        "completed": 60,
-        "failed": 6,
-        "success_rate_pct": 90.9090909090909,
-        "service_share_pct": 64.51612903225806,
-        "p50_latency_ms": 641.291917,
-        "p95_latency_ms": 761.5303749999999
+        "completed": 59,
+        "failed": 7,
+        "success_rate_pct": 89.39393939393939,
+        "service_share_pct": 63.44086021505376,
+        "p50_latency_ms": 643.135114,
+        "p95_latency_ms": 759.388017
       },
       "run-prod-light-1": {
         "total_requests": 15,
@@ -233,17 +233,17 @@
         "failed": 0,
         "success_rate_pct": 100,
         "service_share_pct": 16.129032258064516,
-        "p50_latency_ms": 123.909709,
-        "p95_latency_ms": 333.69241700000003
+        "p50_latency_ms": 119.632024,
+        "p95_latency_ms": 331.897986
       },
       "run-prod-light-2": {
         "total_requests": 19,
-        "completed": 18,
-        "failed": 1,
-        "success_rate_pct": 94.73684210526315,
-        "service_share_pct": 19.35483870967742,
-        "p50_latency_ms": 256.068875,
-        "p95_latency_ms": 387.019958
+        "completed": 19,
+        "failed": 0,
+        "success_rate_pct": 100,
+        "service_share_pct": 20.43010752688172,
+        "p50_latency_ms": 233.97021,
+        "p95_latency_ms": 389.030555
       }
     }
   }

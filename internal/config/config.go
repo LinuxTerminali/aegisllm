@@ -33,6 +33,7 @@ type ServerConfig struct {
 	TokensPerMinute   float64
 	TokenBurst        int
 	MaxPacingDelay    time.Duration
+	AutoLearnLimits   bool
 	MaxRetries        int
 	InitialBackoff    time.Duration
 	MaxBackoff        time.Duration
@@ -53,7 +54,7 @@ func DefaultConfig() ServerConfig {
 		AuthHeaderPrefix:  "",
 		DefaultModel:      "",
 		UpstreamTimeout:   60 * time.Second,
-		MaxConcurrency:    5,
+		MaxConcurrency:    32,
 		MaxQueueSize:      100,
 		MaxQueueWait:      30 * time.Second,
 		RunMockUpstream:   false,
@@ -64,7 +65,8 @@ func DefaultConfig() ServerConfig {
 		RequestBurst:      0,
 		TokensPerMinute:   0, // 0 = unconstrained
 		TokenBurst:        0,
-		MaxPacingDelay:    500 * time.Millisecond,
+		MaxPacingDelay:    0, // 0 = wait for quota up to max-queue-wait instead of rejecting
+		AutoLearnLimits:   true,
 		MaxRetries:        3,
 		InitialBackoff:    50 * time.Millisecond,
 		MaxBackoff:        2 * time.Second,
@@ -115,20 +117,10 @@ func (c *ServerConfig) Validate() error {
 		return fmt.Errorf("tpm must be >= 0, got %f", c.TokensPerMinute)
 	}
 
-	if c.RequestsPerMinute > 0 && c.RequestBurst <= 0 {
-		// Auto-default burst to 10% of RPM or 1
-		c.RequestBurst = int(c.RequestsPerMinute / 10)
-		if c.RequestBurst < 1 {
-			c.RequestBurst = 1
-		}
-	}
-	if c.TokensPerMinute > 0 && c.TokenBurst <= 0 {
-		// Auto-default burst to 10% of TPM or 100
-		c.TokenBurst = int(c.TokensPerMinute / 10)
-		if c.TokenBurst < 100 {
-			c.TokenBurst = 100
-		}
-	}
+	// Burst is left at 0 here: the capacity tracker defaults it to the full per-minute
+	// window, which is how providers enforce "N per minute". A 10% rule here used to
+	// override that and trickle requests from the first one (observed against Groq:
+	// 3 immediate, then one every 2s, with -rpm 30).
 
 	if c.MaxRetries < 0 {
 		return fmt.Errorf("max-retries must be >= 0, got %d", c.MaxRetries)
@@ -182,7 +174,8 @@ func ParseFlags(args []string) (ServerConfig, error) {
 	fs.IntVar(&cfg.RequestBurst, "request-burst", getEnvInt("SCHEDULER_REQUEST_BURST", cfg.RequestBurst), "Request token bucket capacity")
 	fs.Float64Var(&cfg.TokensPerMinute, "tpm", getEnvFloat("SCHEDULER_TPM", cfg.TokensPerMinute), "Maximum tokens per minute quota (0 = unconstrained)")
 	fs.IntVar(&cfg.TokenBurst, "token-burst", getEnvInt("SCHEDULER_TOKEN_BURST", cfg.TokenBurst), "Token rate bucket capacity")
-	fs.DurationVar(&cfg.MaxPacingDelay, "max-pacing-delay", getEnvDuration("SCHEDULER_MAX_PACING_DELAY", cfg.MaxPacingDelay), "Maximum time to pause request to satisfy rate-limiting pacing")
+	fs.DurationVar(&cfg.MaxPacingDelay, "max-pacing-delay", getEnvDuration("SCHEDULER_MAX_PACING_DELAY", cfg.MaxPacingDelay), "Maximum time to pause a request for rate-limit pacing before rejecting with 429 (0 = wait up to max-queue-wait)")
+	fs.BoolVar(&cfg.AutoLearnLimits, "auto-learn-limits", getEnvBool("SCHEDULER_AUTO_LEARN_LIMITS", cfg.AutoLearnLimits), "Learn RPM/TPM limits from provider rate-limit headers when -rpm/-tpm are not set")
 	fs.IntVar(&cfg.MaxRetries, "max-retries", getEnvInt("SCHEDULER_MAX_RETRIES", cfg.MaxRetries), "Maximum coordinated retries on transient errors")
 	fs.DurationVar(&cfg.InitialBackoff, "initial-backoff", getEnvDuration("SCHEDULER_INITIAL_BACKOFF", cfg.InitialBackoff), "Initial backoff duration for retries")
 	fs.DurationVar(&cfg.MaxBackoff, "max-backoff", getEnvDuration("SCHEDULER_MAX_BACKOFF", cfg.MaxBackoff), "Maximum backoff duration for retries")

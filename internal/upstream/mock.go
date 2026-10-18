@@ -165,7 +165,7 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		retryAfterStr = "1"
 	}
 
-	// 1. Check for caller-injected status code override
+	// Check for caller-injected status code override
 	if overrideCodeStr := r.Header.Get("X-Mock-Status"); overrideCodeStr != "" {
 		if code, err := strconv.Atoi(overrideCodeStr); err == nil && code >= 100 && code < 600 {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -184,7 +184,7 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 2. Refill and check token bucket rate limits (RPM and TPM)
+	// Refill and check token bucket rate limits (RPM and TPM)
 	m.mu.Lock()
 	m.refill(time.Now())
 
@@ -195,6 +195,7 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			m.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.Header().Set("Retry-After", retryAfterStr)
+			m.setLimitHeaders(w)
 			w.Header().Set("x-ratelimit-remaining-tokens", "0")
 			w.Header().Set("x-ratelimit-reset-tokens", "1s")
 			w.WriteHeader(http.StatusTooManyRequests)
@@ -216,6 +217,7 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			m.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.Header().Set("Retry-After", retryAfterStr)
+			m.setLimitHeaders(w)
 			w.Header().Set("x-ratelimit-remaining-requests", "0")
 			w.Header().Set("x-ratelimit-reset-requests", "1s")
 			w.WriteHeader(http.StatusTooManyRequests)
@@ -235,7 +237,7 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	remTok := int(m.tokTokens)
 	m.mu.Unlock()
 
-	// 3. Check for concurrency overload in mock
+	// Check for concurrency overload in mock
 	if m.config.MaxAllowedInFlight > 0 && current > int64(m.config.MaxAllowedInFlight) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Retry-After", retryAfterStr)
@@ -250,7 +252,7 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. Determine latency
+	// Determine latency
 	latency := m.config.BaseLatency
 	if delayOverride := r.Header.Get("X-Mock-Delay"); delayOverride != "" {
 		if d, err := time.ParseDuration(delayOverride); err == nil {
@@ -267,7 +269,7 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 5. Return valid OpenAI chat completion response with rate limit headers
+	// Return valid OpenAI chat completion response with rate limit headers
 	resp := ChatCompletionResponse{
 		ID:      fmt.Sprintf("chatcmpl-mock-%d", reqNum),
 		Object:  "chat.completion",
@@ -293,7 +295,7 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	m.setLimitHeaders(w)
 	if m.config.RateLimitRPS > 0 {
 		w.Header().Set("x-ratelimit-remaining-requests", strconv.Itoa(remReq))
 		w.Header().Set("x-ratelimit-reset-requests", "1s")
@@ -303,8 +305,51 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("x-ratelimit-reset-tokens", "1s")
 	}
 
+	// Streaming: emit OpenAI-style SSE chunks, a final usage chunk, then [DONE].
+	if chatReq.Stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		words := []string{"Response", "from", "mock", "stream"}
+		for i, word := range words {
+			chunk := map[string]any{
+				"id": resp.ID, "object": "chat.completion.chunk", "created": resp.Created, "model": modelName,
+				"choices": []map[string]any{{"index": 0, "delta": map[string]any{"content": word + " "}, "finish_reason": nil}},
+			}
+			if i == len(words)-1 {
+				chunk["choices"] = []map[string]any{{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}
+			}
+			b, _ := json.Marshal(chunk)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		usageChunk, _ := json.Marshal(map[string]any{
+			"id": resp.ID, "object": "chat.completion.chunk", "created": resp.Created, "model": modelName,
+			"choices": []any{}, "usage": resp.Usage,
+		})
+		_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", usageChunk)
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// setLimitHeaders mirrors what OpenAI and Anthropic send on every response: the per-minute limits.
+func (m *MockUpstream) setLimitHeaders(w http.ResponseWriter) {
+	if m.config.RateLimitRPS > 0 {
+		w.Header().Set("x-ratelimit-limit-requests", strconv.Itoa(int(m.config.RateLimitRPS*60)))
+	}
+	if m.config.RateLimitTPS > 0 {
+		w.Header().Set("x-ratelimit-limit-tokens", strconv.Itoa(int(m.config.RateLimitTPS*60)))
+	}
 }
 
 func (m *MockUpstream) refill(now time.Time) {

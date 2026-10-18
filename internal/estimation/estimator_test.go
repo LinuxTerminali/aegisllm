@@ -7,13 +7,13 @@ import (
 func TestHeuristicEstimator_Estimate(t *testing.T) {
 	est := NewHeuristicEstimator(DefaultConfig())
 
-	// 1. Empty body
+	// Empty body
 	res := est.Estimate(nil)
 	if res.PromptTokens != 1 || res.CompletionTokens != 64 || res.TotalTokens != 65 {
 		t.Fatalf("unexpected empty body estimation: %+v", res)
 	}
 
-	// 2. Standard OpenAI JSON with string content
+	// Standard OpenAI JSON with string content
 	body := []byte(`{
 		"model": "gpt-4o",
 		"messages": [
@@ -34,7 +34,7 @@ func TestHeuristicEstimator_Estimate(t *testing.T) {
 		t.Fatalf("total tokens mismatch: %+v", res)
 	}
 
-	// 3. Multimodal content array
+	// Multimodal content array
 	bodyMultimodal := []byte(`{
 		"model": "gpt-4o",
 		"messages": [

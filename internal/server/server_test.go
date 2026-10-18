@@ -50,7 +50,7 @@ func TestServer_HealthzAndStatus(t *testing.T) {
 	testServer := httptest.NewServer(srv.httpServer.Handler)
 	defer testServer.Close()
 
-	// 1. Test /healthz
+	// Test /healthz
 	resp, err := http.Get(testServer.URL + "/healthz")
 	if err != nil {
 		t.Fatalf("healthz request failed: %v", err)
@@ -66,7 +66,7 @@ func TestServer_HealthzAndStatus(t *testing.T) {
 		t.Errorf("expected health status 'ok', got '%s'", healthBody["status"])
 	}
 
-	// 2. Test /status
+	// Test /status
 	statusResp, err := http.Get(testServer.URL + "/status")
 	if err != nil {
 		t.Fatalf("status request failed: %v", err)
