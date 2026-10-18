@@ -57,3 +57,28 @@ func TestPrepareRequest_PreservesQueryAndStripsAcceptEncoding(t *testing.T) {
 		t.Fatalf("openai path doubled: %s", req2.URL.String())
 	}
 }
+
+func TestPrepareRequest_ConfiguredKeyOverridesClientKey(t *testing.T) {
+	a := NewAnthropicProvider("real-key", "")
+	base, _ := url.Parse("https://api.anthropic.com")
+	in := http.Header{}
+	in.Set("x-api-key", "placeholder")
+	in.Set("Authorization", "Bearer placeholder")
+	req, err := a.PrepareRequest(context.Background(), base, "/v1/messages", in, []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Header.Get("x-api-key") != "real-key" {
+		t.Fatalf("configured key must win, got %q", req.Header.Get("x-api-key"))
+	}
+	if req.Header.Get("Authorization") != "" {
+		t.Fatalf("client Authorization must be dropped when proxy holds the key")
+	}
+
+	// No configured key: caller's credential passes through.
+	g := NewGenericProvider("", "", "", "")
+	req2, _ := g.PrepareRequest(context.Background(), base, "/v1/chat/completions", in, []byte(`{}`))
+	if req2.Header.Get("Authorization") != "Bearer placeholder" {
+		t.Fatalf("pass-through credential lost")
+	}
+}

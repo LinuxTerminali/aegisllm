@@ -138,8 +138,13 @@ func (p *BaseProvider) PrepareRequest(ctx context.Context, targetURL *url.URL, p
 
 	req.Header.Set("Content-Type", "application/json")
 
-	// Inject authentication header if configured and not already set by caller
-	if p.apiKey != "" && req.Header.Get(p.authHeaderName) == "" {
+	// When the proxy holds the provider key, it is the only credential that reaches the
+	// provider. Clients then send any placeholder (SDKs refuse to start without one) and
+	// never need the real key. Without a configured key, the caller's credential passes through.
+	if p.apiKey != "" {
+		for _, h := range []string{"Authorization", "x-api-key", "api-key"} {
+			req.Header.Del(h)
+		}
 		req.Header.Set(p.authHeaderName, p.authHeaderPrefix+p.apiKey)
 	}
 

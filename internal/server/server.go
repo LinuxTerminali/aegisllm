@@ -94,8 +94,10 @@ func NewServer(cfg config.ServerConfig, client *upstream.Client, s *scheduler.Sc
 	handlers := NewHandlers(s, client, rp, m)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/chat/completions", handlers.ChatCompletions)
-	mux.HandleFunc("/v1/messages", handlers.ChatCompletions) // Anthropic Messages API
+	// Every provider call under /v1/ goes through the scheduler: chat/completions, messages,
+	// messages/count_tokens, completions, embeddings, responses. The handler is body-agnostic;
+	// the estimator falls back to a byte-length heuristic for shapes it does not know.
+	mux.HandleFunc("/v1/", handlers.ChatCompletions)
 	mux.HandleFunc("/healthz", handlers.Healthz)
 	mux.HandleFunc("/status", handlers.Status)
 	mux.HandleFunc("/metrics", handlers.Metrics)
