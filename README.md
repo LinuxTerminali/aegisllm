@@ -51,13 +51,16 @@ A high-performance, single-binary HTTP proxy written in Go that shields LLM prov
 2. **Hierarchical WDRR Fairness Across Runs**:
    When configured with `-scheduling-policy fair` (default), requests are scheduled by priority class weights. Within each priority class, distinct `X-Run-ID` values receive fair Deficit Round-Robin service, preventing high-volume agent runs from starving concurrent runs.
 
-3. **RPM and TPM Capacity Pacing**:
-   Dual token-bucket rate limiter tracks both Requests Per Minute (RPM) and Tokens Per Minute (TPM). Incoming requests reserve estimated tokens (via prompt heuristic estimation). When quota is depleted, requests are paced up to `-max-pacing-delay`. If deadline cannot be met, request is rejected with HTTP 429 (`rate_limit_exceeded`).
+3. **RPM and TPM Capacity Pacing (wait, don't shed)**:
+   Dual token-bucket rate limiter tracks both Requests Per Minute (RPM) and Tokens Per Minute (TPM). Incoming requests reserve estimated tokens (via prompt heuristic estimation). When quota is depleted, requests **wait for it** – bounded only by `-max-queue-wait` (or the caller's own deadline) – so the queue drains at exactly the provider's rate and callers never see a 429 the scheduler could have avoided. Set `-max-pacing-delay` to a positive value to opt back into load shedding (reject with 429 once the wait would exceed it).
 
-4. **Coordinated Retries & Token Reconciliation**:
-   Transient errors (HTTP 429, 502, 503, 504) are retried with exponential backoff and full random jitter, honoring upstream `Retry-After` headers. Non-retryable client errors (400, 401, 403, 404) fail fast without retry. On successful response, provider token usage (`usage.total_tokens`) reconciles initial reservations.
+4. **Limits learned from the provider**:
+   You do not have to know your RPM/TPM. With `-auto-learn-limits` (default on) the tracker reads `x-ratelimit-limit-*` / `anthropic-ratelimit-*-limit` from every response and configures the buckets from them; explicit `-rpm`/`-tpm` always win. An upstream 429 drains the shared buckets and, when `Retry-After` is present, holds every queued request until it elapses – so one rejection stops the whole fleet from piling on.
 
-5. **Security & Credential Safety**:
+5. **Coordinated Retries & Token Reconciliation**:
+   Transient errors (HTTP 429, 502, 503, 504) are retried with exponential backoff and full random jitter, honoring upstream `Retry-After` headers. Non-retryable client errors (400, 401, 403, 404) fail fast without retry. On successful response, provider token usage (OpenAI `usage.total_tokens` or Anthropic `usage.input_tokens + output_tokens`) reconciles initial reservations.
+
+6. **Security & Credential Safety**:
    - Prompts, completion messages, and API keys are **never logged**.
    - Upstream error messages are scrubbed to prevent leaking secret keys (`sk-...`, `Bearer ...`).
    - Hop-by-hop and internal headers (`X-Run-ID`, `X-Priority`, `X-Scheduler-*`) are stripped before forwarding.
@@ -71,7 +74,7 @@ The proxy provides explicit provider adapters via `-provider-type`:
 | Provider Type | Identifier | Default Auth Header | Quota Headers Parsed |
 | :--- | :--- | :--- | :--- |
 | **OpenAI** (default) | `openai` | `Authorization: Bearer <key>` | `x-ratelimit-remaining-*`, `x-ratelimit-reset-*` |
-| **Anthropic** | `anthropic` | `x-api-key: <key>`, `anthropic-version` | `anthropic-ratelimit-*` |
+| **Anthropic** | `anthropic` | `x-api-key: <key>`, `anthropic-version` | `anthropic-ratelimit-*` (Messages API routed at `/v1/messages`) |
 | **Azure OpenAI** | `azure` | `api-key: <key>` | `x-ratelimit-*`, Azure standards |
 | **Generic / Local** | `generic` | Configurable (`-auth-header-name`) | Standard IETF `RateLimit-*` & OpenAI-style |
 
@@ -126,7 +129,7 @@ Exposes standard Prometheus exposition format with **strictly bounded cardinalit
 | `-auth-header-name`| `SCHEDULER_AUTH_HEADER_NAME` | `""` | Custom auth header name (generic adapter) |
 | `-default-model` | `SCHEDULER_DEFAULT_MODEL` | `""` | Fallback model if omitted in request |
 | `-upstream-timeout`| `SCHEDULER_UPSTREAM_TIMEOUT` | `60s` | Upstream HTTP request timeout |
-| `-max-concurrency` | `SCHEDULER_MAX_CONCURRENCY` | `5` | In-flight execution concurrency limit |
+| `-max-concurrency` | `SCHEDULER_MAX_CONCURRENCY` | `32` | In-flight execution concurrency limit |
 | `-max-queue-size` | `SCHEDULER_MAX_QUEUE_SIZE` | `100` | Max queued requests before rejection (503) |
 | `-max-queue-wait` | `SCHEDULER_MAX_QUEUE_WAIT` | `30s` | Max queue wait deadline before timeout (504) |
 | `-scheduling-policy`| `SCHEDULER_SCHEDULING_POLICY`| `fair` | Queue policy: `fair` (WDRR), `priority`, `fifo` |
@@ -134,7 +137,8 @@ Exposes standard Prometheus exposition format with **strictly bounded cardinalit
 | `-request-burst` | `SCHEDULER_REQUEST_BURST` | `0` | RPM token bucket burst allowance |
 | `-tpm` | `SCHEDULER_TPM` | `0` | Max tokens per minute quota (0 = unconstrained) |
 | `-token-burst` | `SCHEDULER_TOKEN_BURST` | `0` | TPM token bucket burst allowance |
-| `-max-pacing-delay`| `SCHEDULER_MAX_PACING_DELAY` | `500ms` | Max sleep pacing delay before 429 rejection |
+| `-max-pacing-delay`| `SCHEDULER_MAX_PACING_DELAY` | `0` | Max pacing wait before 429 rejection; `0` = wait for quota up to `-max-queue-wait` |
+| `-auto-learn-limits`| `SCHEDULER_AUTO_LEARN_LIMITS` | `true` | Learn RPM/TPM from provider rate-limit headers when `-rpm`/`-tpm` are unset |
 | `-max-retries` | `SCHEDULER_MAX_RETRIES` | `3` | Coordinated retries on transient errors |
 | `-initial-backoff` | `SCHEDULER_INITIAL_BACKOFF` | `50ms` | Base retry backoff |
 | `-max-backoff` | `SCHEDULER_MAX_BACKOFF` | `2s` | Max retry backoff ceiling |
@@ -209,17 +213,33 @@ go run ./cmd/benchmark -scenario competing-runs -requests 100 -burst 40
 # Client deadline cancellation under queue load
 go run ./cmd/benchmark -scenario cancellation -requests 100 -burst 40
 
-# Token bucket RPM rate-limit enforcement
+# Token bucket RPM rate-limit enforcement (scheduler learns the limit from headers)
 go run ./cmd/benchmark -scenario rpm -requests 100 -burst 20
 
 # Token bucket TPM rate-limit enforcement
 go run ./cmd/benchmark -scenario tpm -requests 100 -burst 20
+
+# Same, but the scheduler is told the limit up front
+go run ./cmd/benchmark -scenario rpm -auto-learn=false
 
 # Mixed prompt lengths (short vs long tokens)
 go run ./cmd/benchmark -scenario token-mix -requests 100 -burst 20
 ```
 
 ---
+
+### Rate-limit scenario (`benchmark_results_ratelimit.json`)
+
+100 requests, upstream limited to 15 RPS (900 RPM) with burst 5, scheduler **not** configured with the limit. Clients wait up to 20s, as agents do.
+
+| Mode | Success | Upstream 429s | Retries | Wall clock |
+| :--- | :--- | :--- | :--- | :--- |
+| A. Direct + retries & jitter | 57% | 43 | 213 | 3.8s |
+| B. FIFO scheduler | 100% | 0 | 1 | 7.3s |
+| C. Priority scheduler | 100% | 0 | 1 | 7.3s |
+| D. Fair scheduler (WDRR) | 100% | 0 | 1 | 7.3s |
+
+Theoretical minimum for this workload is ~6.3s. With priority scheduling, `production` requests complete at p50 ≈ 2.1s while `batch` waits (p50 ≈ 6.6s). The single upstream 429 in each scheduler mode is the first burst before limits are learned; its retry re-enters the quota gate and succeeds.
 
 ## Production Limitations & Deployment Notice
 

@@ -20,6 +20,10 @@ type Estimator interface {
 type Config struct {
 	DefaultCompletionTokens int
 	CharsPerToken           float64
+	// MaxCompletionReserve caps how many completion tokens a single request may reserve
+	// up front from max_tokens. Agent calls commonly set 8k-32k; under-reserving is how
+	// the shared quota still gets blown. The capacity tracker further clamps to its burst size.
+	MaxCompletionReserve int
 }
 
 // DefaultConfig returns safe defaults for heuristic token estimation.
@@ -27,6 +31,7 @@ func DefaultConfig() Config {
 	return Config{
 		DefaultCompletionTokens: 64,
 		CharsPerToken:           4.0,
+		MaxCompletionReserve:    32768,
 	}
 }
 
@@ -43,11 +48,15 @@ func NewHeuristicEstimator(cfg Config) *HeuristicEstimator {
 	if cfg.CharsPerToken <= 0 {
 		cfg.CharsPerToken = 4.0
 	}
+	if cfg.MaxCompletionReserve <= 0 {
+		cfg.MaxCompletionReserve = 32768
+	}
 	return &HeuristicEstimator{cfg: cfg}
 }
 
 type incomingChatPayload struct {
 	Model    string `json:"model"`
+	System   any    `json:"system"` // Anthropic Messages API: string or array of text blocks
 	Messages []struct {
 		Role    string `json:"role"`
 		Content any    `json:"content"` // Can be string or array of multimodal parts
@@ -82,6 +91,18 @@ func (e *HeuristicEstimator) Estimate(body []byte) TokenEstimate {
 	}
 
 	totalChars := 0
+	switch sys := payload.System.(type) {
+	case string:
+		totalChars += len(sys)
+	case []any:
+		for _, part := range sys {
+			if m, ok := part.(map[string]any); ok {
+				if text, hasText := m["text"].(string); hasText {
+					totalChars += len(text)
+				}
+			}
+		}
+	}
 	for _, msg := range payload.Messages {
 		totalChars += len(msg.Role)
 		switch c := msg.Content.(type) {
@@ -109,9 +130,9 @@ func (e *HeuristicEstimator) Estimate(body []byte) TokenEstimate {
 	completionTokens := e.cfg.DefaultCompletionTokens
 	if payload.MaxTokens != nil && *payload.MaxTokens > 0 {
 		completionTokens = *payload.MaxTokens
-		// Bound conservative reservation to prevent single request monopolizing huge bucket
-		if completionTokens > 2048 {
-			completionTokens = 2048
+		// Bound reservation to prevent a single request monopolizing the bucket
+		if completionTokens > e.cfg.MaxCompletionReserve {
+			completionTokens = e.cfg.MaxCompletionReserve
 		}
 	}
 

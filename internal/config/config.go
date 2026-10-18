@@ -33,6 +33,7 @@ type ServerConfig struct {
 	TokensPerMinute   float64
 	TokenBurst        int
 	MaxPacingDelay    time.Duration
+	AutoLearnLimits   bool
 	MaxRetries        int
 	InitialBackoff    time.Duration
 	MaxBackoff        time.Duration
@@ -53,7 +54,7 @@ func DefaultConfig() ServerConfig {
 		AuthHeaderPrefix:  "",
 		DefaultModel:      "",
 		UpstreamTimeout:   60 * time.Second,
-		MaxConcurrency:    5,
+		MaxConcurrency:    32,
 		MaxQueueSize:      100,
 		MaxQueueWait:      30 * time.Second,
 		RunMockUpstream:   false,
@@ -64,7 +65,8 @@ func DefaultConfig() ServerConfig {
 		RequestBurst:      0,
 		TokensPerMinute:   0, // 0 = unconstrained
 		TokenBurst:        0,
-		MaxPacingDelay:    500 * time.Millisecond,
+		MaxPacingDelay:    0, // 0 = wait for quota up to max-queue-wait instead of rejecting
+		AutoLearnLimits:   true,
 		MaxRetries:        3,
 		InitialBackoff:    50 * time.Millisecond,
 		MaxBackoff:        2 * time.Second,
@@ -182,7 +184,8 @@ func ParseFlags(args []string) (ServerConfig, error) {
 	fs.IntVar(&cfg.RequestBurst, "request-burst", getEnvInt("SCHEDULER_REQUEST_BURST", cfg.RequestBurst), "Request token bucket capacity")
 	fs.Float64Var(&cfg.TokensPerMinute, "tpm", getEnvFloat("SCHEDULER_TPM", cfg.TokensPerMinute), "Maximum tokens per minute quota (0 = unconstrained)")
 	fs.IntVar(&cfg.TokenBurst, "token-burst", getEnvInt("SCHEDULER_TOKEN_BURST", cfg.TokenBurst), "Token rate bucket capacity")
-	fs.DurationVar(&cfg.MaxPacingDelay, "max-pacing-delay", getEnvDuration("SCHEDULER_MAX_PACING_DELAY", cfg.MaxPacingDelay), "Maximum time to pause request to satisfy rate-limiting pacing")
+	fs.DurationVar(&cfg.MaxPacingDelay, "max-pacing-delay", getEnvDuration("SCHEDULER_MAX_PACING_DELAY", cfg.MaxPacingDelay), "Maximum time to pause a request for rate-limit pacing before rejecting with 429 (0 = wait up to max-queue-wait)")
+	fs.BoolVar(&cfg.AutoLearnLimits, "auto-learn-limits", getEnvBool("SCHEDULER_AUTO_LEARN_LIMITS", cfg.AutoLearnLimits), "Learn RPM/TPM limits from provider rate-limit headers when -rpm/-tpm are not set")
 	fs.IntVar(&cfg.MaxRetries, "max-retries", getEnvInt("SCHEDULER_MAX_RETRIES", cfg.MaxRetries), "Maximum coordinated retries on transient errors")
 	fs.DurationVar(&cfg.InitialBackoff, "initial-backoff", getEnvDuration("SCHEDULER_INITIAL_BACKOFF", cfg.InitialBackoff), "Initial backoff duration for retries")
 	fs.DurationVar(&cfg.MaxBackoff, "max-backoff", getEnvDuration("SCHEDULER_MAX_BACKOFF", cfg.MaxBackoff), "Maximum backoff duration for retries")

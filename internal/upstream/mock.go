@@ -195,6 +195,7 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			m.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.Header().Set("Retry-After", retryAfterStr)
+			m.setLimitHeaders(w)
 			w.Header().Set("x-ratelimit-remaining-tokens", "0")
 			w.Header().Set("x-ratelimit-reset-tokens", "1s")
 			w.WriteHeader(http.StatusTooManyRequests)
@@ -216,6 +217,7 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			m.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.Header().Set("Retry-After", retryAfterStr)
+			m.setLimitHeaders(w)
 			w.Header().Set("x-ratelimit-remaining-requests", "0")
 			w.Header().Set("x-ratelimit-reset-requests", "1s")
 			w.WriteHeader(http.StatusTooManyRequests)
@@ -294,6 +296,7 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	m.setLimitHeaders(w)
 	if m.config.RateLimitRPS > 0 {
 		w.Header().Set("x-ratelimit-remaining-requests", strconv.Itoa(remReq))
 		w.Header().Set("x-ratelimit-reset-requests", "1s")
@@ -305,6 +308,16 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// setLimitHeaders mirrors what OpenAI and Anthropic send on every response: the per-minute limits.
+func (m *MockUpstream) setLimitHeaders(w http.ResponseWriter) {
+	if m.config.RateLimitRPS > 0 {
+		w.Header().Set("x-ratelimit-limit-requests", strconv.Itoa(int(m.config.RateLimitRPS*60)))
+	}
+	if m.config.RateLimitTPS > 0 {
+		w.Header().Set("x-ratelimit-limit-tokens", strconv.Itoa(int(m.config.RateLimitTPS*60)))
+	}
 }
 
 func (m *MockUpstream) refill(now time.Time) {

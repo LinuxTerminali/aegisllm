@@ -208,6 +208,22 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 					retryAfter = ra
 				}
 			}
+			// After a 429 the retry must re-enter the quota gate; otherwise it races the
+			// paced queue with blind backoff and can lose indefinitely.
+			if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
+				if err := lease.RePace(r.Context()); err != nil {
+					if errors.Is(err, r.Context().Err()) {
+						h.metrics.RecordCanceled()
+						return
+					}
+					h.metrics.RecordRejection("capacity_exceeded")
+					w.Header().Set("X-Scheduler-Error", "capacity_exceeded")
+					model.WriteJSONError(w, http.StatusTooManyRequests, "Capacity rate limit quota exhausted while retrying", "rate_limit_exceeded", 429)
+					return
+				}
+				retryAfter = 0 // the hold was already served by RePace
+			}
+
 			backoff := h.retryPolicy.CalculateBackoff(attempt-1, retryAfter, rng)
 			timer := time.NewTimer(backoff)
 			select {
@@ -237,6 +253,13 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// Reconcile provider headers after every upstream response
 		h.scheduler.ReconcileHeaders(resp.Header)
 
+		// An upstream 429 is the strongest signal that the shared quota is gone:
+		// hold back everything queued behind us for the provider's Retry-After.
+		if resp.StatusCode == http.StatusTooManyRequests {
+			ra, _ := upstream.ParseRetryAfter(resp.Header.Get("Retry-After"))
+			h.scheduler.MarkUpstreamRateLimited(ra)
+		}
+
 		if !retry.IsRetryable(resp.StatusCode) || attempt == h.retryPolicy.MaxRetries {
 			break
 		}
@@ -256,9 +279,8 @@ func (h *Handlers) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 6. Read bounded response body
 	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
 	if readErr == nil && resp.StatusCode == http.StatusOK {
-		var chatResp upstream.ChatCompletionResponse
-		if json.Unmarshal(respBody, &chatResp) == nil && chatResp.Usage.TotalTokens > 0 {
-			lease.Reconcile(chatResp.Usage.TotalTokens)
+		if used := upstream.ParseUsageTokens(respBody); used > 0 {
+			lease.Reconcile(used)
 		}
 	}
 

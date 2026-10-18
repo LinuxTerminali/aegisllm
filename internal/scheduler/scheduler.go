@@ -80,6 +80,33 @@ func (l *Lease) Reconcile(actualTokens int) {
 	}
 }
 
+// RePace is called before retrying after an upstream 429. The previous reservation did not
+// consume provider quota, so it is returned, and a fresh reservation is taken through the
+// tracker: the retry waits for quota (and any Retry-After hold) like every other request
+// instead of racing the queue with blind backoff.
+func (l *Lease) RePace(ctx context.Context) error {
+	if l.released.Load() || l.scheduler.tracker == nil {
+		return nil
+	}
+	if l.reservation != nil && l.reconciled.CompareAndSwap(false, true) {
+		l.scheduler.tracker.Release(l.reservation)
+	}
+	est := 1
+	if l.reservation != nil {
+		est = l.reservation.EstimatedTokens
+	}
+	paceCtx, cancel := context.WithTimeout(ctx, l.scheduler.cfg.MaxQueueWait)
+	defer cancel()
+	res, err := l.scheduler.tracker.Reserve(paceCtx, l.meta.RequestID, est)
+	if err != nil {
+		l.reservation = nil
+		return err
+	}
+	l.reservation = res
+	l.reconciled.Store(false)
+	return nil
+}
+
 // Release yields the execution slot back to the scheduler and releases unused capacity.
 // Must be called exactly once when request processing completes.
 func (l *Lease) Release() {
@@ -212,9 +239,24 @@ func (s *Scheduler) Acquire(ctx context.Context, meta model.RequestMetadata, bod
 		}
 	}
 
-	// 3. Reserve capacity & pace (RPM and TPM)
-	reservation, err := s.tracker.Reserve(ctx, meta.RequestID, estTokens)
+	// 3. Reserve capacity & pace (RPM and TPM). The wait is bounded by whatever is left of
+	// MaxQueueWait so a request never waits longer in total than the configured queue deadline.
+	remaining := s.cfg.MaxQueueWait - time.Since(start)
+	if remaining <= 0 {
+		s.releaseSlot()
+		s.totalTimedOut.Add(1)
+		return nil, ErrWaitTimeout
+	}
+	paceCtx, cancelPace := context.WithTimeout(ctx, remaining)
+	reservation, err := s.tracker.Reserve(paceCtx, meta.RequestID, estTokens)
+	cancelPace()
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			// Our pacing deadline fired, not the caller's: report as a queue timeout.
+			s.releaseSlot()
+			s.totalTimedOut.Add(1)
+			return nil, ErrWaitTimeout
+		}
 		// Release acquired concurrency slot if pacing failed or context canceled
 		s.releaseSlot()
 		if errors.Is(err, ctx.Err()) {
@@ -226,6 +268,9 @@ func (s *Scheduler) Acquire(ctx context.Context, meta model.RequestMetadata, bod
 	}
 
 	s.totalAdmitted.Add(1)
+	if paced := time.Since(start); paced > waitDur {
+		waitDur = paced
+	}
 	return &Lease{
 		scheduler:    s,
 		meta:         meta,
@@ -252,6 +297,14 @@ func (s *Scheduler) releaseSlot() {
 func (s *Scheduler) ReconcileHeaders(h http.Header) {
 	if s.tracker != nil {
 		s.tracker.ReconcileHeaders(h)
+	}
+}
+
+// MarkUpstreamRateLimited tells the capacity tracker the provider rejected a request with 429,
+// so queued requests are held back for retryAfter instead of piling on.
+func (s *Scheduler) MarkUpstreamRateLimited(retryAfter time.Duration) {
+	if s.tracker != nil {
+		s.tracker.MarkExhausted(retryAfter)
 	}
 }
 

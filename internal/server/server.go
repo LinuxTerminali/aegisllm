@@ -43,6 +43,7 @@ func NewServer(cfg config.ServerConfig, client *upstream.Client, s *scheduler.Sc
 			TokensPerMinute:   cfg.TokensPerMinute,
 			TokenBurst:        cfg.TokenBurst,
 			MaxPacingDelay:    cfg.MaxPacingDelay,
+			AutoLearn:         cfg.AutoLearnLimits,
 		})
 		est := estimation.NewHeuristicEstimator(estimation.DefaultConfig())
 
@@ -94,6 +95,7 @@ func NewServer(cfg config.ServerConfig, client *upstream.Client, s *scheduler.Sc
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", handlers.ChatCompletions)
+	mux.HandleFunc("/v1/messages", handlers.ChatCompletions) // Anthropic Messages API
 	mux.HandleFunc("/healthz", handlers.Healthz)
 	mux.HandleFunc("/status", handlers.Status)
 	mux.HandleFunc("/metrics", handlers.Metrics)

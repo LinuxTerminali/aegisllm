@@ -117,6 +117,8 @@ func main() {
 	rateLimitTPS := flag.Float64("rate-limit-tps", 0, "Optional upstream token bucket rate limit TPS (0 = disabled)")
 	rateLimitTokenBurst := flag.Int("rate-limit-token-burst", 0, "Optional upstream token bucket token burst capacity")
 	jsonOut := flag.String("json-out", "", "Path to write JSON benchmark report")
+	clientTimeout := flag.Duration("client-timeout", 0, "Override per-request client deadline for every run (0 = scenario default)")
+	autoLearn := flag.Bool("auto-learn", true, "Scheduler modes learn RPM/TPM from upstream headers instead of being configured with the limit")
 	flag.Parse()
 
 	// Apply scenario defaults if not explicitly overridden
@@ -126,10 +128,18 @@ func main() {
 			*rateLimitRPS = 15
 			*rateLimitBurst = 5
 		}
+		// Agents wait for an answer; they do not give up in 600ms. Without this the workload is
+		// infeasible for any scheduler (100 requests at 15 RPS need ~7s) and every mode scores ~30%.
+		if *clientTimeout == 0 {
+			*clientTimeout = 20 * time.Second
+		}
 	case "tpm":
 		if *rateLimitTPS == 0 {
 			*rateLimitTPS = 400
 			*rateLimitTokenBurst = 200
+		}
+		if *clientTimeout == 0 {
+			*clientTimeout = 20 * time.Second
 		}
 	}
 
@@ -141,6 +151,12 @@ func main() {
 
 	// 1. Generate identical workload
 	workload := generateWorkload(*scenario, *requestsCount, *seed, *burstCount)
+	if *clientTimeout > 0 {
+		for i := range workload {
+			workload[i].ClientTimeout = *clientTimeout
+		}
+	}
+	schedKnowsLimits := !*autoLearn
 
 	// 2. Mode A: Direct requests with independent retries and jitter
 	fmt.Printf(">>> Running Mode A: Direct Upstream Calls (with Retries & Jitter)...\n")
@@ -148,15 +164,15 @@ func main() {
 
 	// 3. Mode B: Scheduler with FIFO Ordering
 	fmt.Printf(">>> Running Mode B: Bounded FIFO Scheduler...\n")
-	reportB := runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyFIFO, "B. Bounded FIFO Scheduler")
+	reportB := runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyFIFO, "B. Bounded FIFO Scheduler", schedKnowsLimits)
 
 	// 4. Mode C: Scheduler with Priority Ordering
 	fmt.Printf(">>> Running Mode C: Priority-Aware Scheduler...\n")
-	reportC := runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyPriority, "C. Priority Scheduler")
+	reportC := runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyPriority, "C. Priority Scheduler", schedKnowsLimits)
 
 	// 5. Mode D: Fair Scheduler (Per-Run WDRR)
 	fmt.Printf(">>> Running Mode D: Fair Scheduler (Per-Run WDRR)...\n")
-	reportD := runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyFair, "D. Fair Scheduler (WDRR)")
+	reportD := runModeScheduler(workload, *upstreamConc, *rateLimitRPS, *rateLimitBurst, *rateLimitTPS, *rateLimitTokenBurst, queue.PolicyFair, "D. Fair Scheduler (WDRR)", schedKnowsLimits)
 
 	// 6. Print Comparison Summary
 	reports := []BenchmarkReport{reportA, reportB, reportC, reportD}
@@ -403,7 +419,7 @@ func runModeA(workload []WorkloadRequest, upstreamConcurrency int, rateLimitRPS 
 }
 
 // runModeScheduler runs workload against the scheduler with specified policy.
-func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateLimitRPS float64, rateLimitBurst int, rateLimitTPS float64, rateLimitTokenBurst int, policy queue.SchedulingPolicy, modeName string) BenchmarkReport {
+func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateLimitRPS float64, rateLimitBurst int, rateLimitTPS float64, rateLimitTokenBurst int, policy queue.SchedulingPolicy, modeName string, knowsLimits bool) BenchmarkReport {
 	mock := upstream.NewMockUpstream(upstream.MockConfig{
 		MaxAllowedInFlight:  upstreamConcurrency,
 		RateLimitRPS:        rateLimitRPS,
@@ -414,18 +430,22 @@ func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateL
 	mockServer := httptest.NewServer(mock)
 	defer mockServer.Close()
 
+	maxClientTimeout := 2 * time.Second
+	for _, r := range workload {
+		if r.ClientTimeout > maxClientTimeout {
+			maxClientTimeout = r.ClientTimeout
+		}
+	}
+
 	cfg := config.ServerConfig{
 		ListenAddr:        "127.0.0.1:0",
 		UpstreamURL:       mockServer.URL,
 		MaxConcurrency:    upstreamConcurrency,
-		MaxQueueSize:      50,
-		MaxQueueWait:      2 * time.Second,
+		MaxQueueSize:      len(workload),
+		MaxQueueWait:      maxClientTimeout,
 		SchedulingPolicy:  string(policy),
-		RequestsPerMinute: rateLimitRPS * 60,
-		RequestBurst:      rateLimitBurst,
-		TokensPerMinute:   rateLimitTPS * 60,
-		TokenBurst:        rateLimitTokenBurst,
-		MaxPacingDelay:    2 * time.Second,
+		AutoLearnLimits:   !knowsLimits,
+		MaxPacingDelay:    0, // wait for quota up to the queue deadline
 		MaxRetries:        3,
 		InitialBackoff:    25 * time.Millisecond,
 		MaxBackoff:        250 * time.Millisecond,
@@ -433,6 +453,12 @@ func runModeScheduler(workload []WorkloadRequest, upstreamConcurrency int, rateL
 		WeightInteractive: 4,
 		WeightBackground:  2,
 		WeightBatch:       1,
+	}
+	if knowsLimits {
+		cfg.RequestsPerMinute = rateLimitRPS * 60
+		cfg.RequestBurst = rateLimitBurst
+		cfg.TokensPerMinute = rateLimitTPS * 60
+		cfg.TokenBurst = rateLimitTokenBurst
 	}
 
 	client, err := upstream.NewClient(upstream.ClientConfig{BaseURL: mockServer.URL})
